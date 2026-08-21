@@ -483,3 +483,108 @@ fn tomography_runs_offline_online_pair_and_classifies() {
     assert!(out.join("world.lock.yaml").exists());
     assert!(out.join("compose.yaml").exists());
 }
+
+#[test]
+fn compose_services_appear_as_declared_external_systems() {
+    let out = temp_out("compose");
+    let fixture = fixtures().join("network-caller");
+    let (ok, _, stderr) = run_ovid(&[
+        "analyze",
+        fixture.to_str().unwrap(),
+        "--workloads",
+        "test",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "analyze failed: {stderr}");
+    let manifest = load_manifest(&out);
+    let external = manifest["external_systems"].as_array().unwrap();
+
+    // mailhog is declared in compose but never contacted: declared-only
+    // record with classified protocol, zero attempts, no dynamic states.
+    let mailhog = external
+        .iter()
+        .find(|s| s["id"] == "mailhog")
+        .expect("declared-only service present");
+    assert_eq!(mailhog["identity"], "declared");
+    assert_eq!(mailhog["declared"], true);
+    assert_eq!(mailhog["port"], 2525);
+    assert_eq!(
+        mailhog["protocol"], "smtp",
+        "declared port classified via protocol pack"
+    );
+    assert_eq!(mailhog["attempts"], 0);
+    assert!(
+        mailhog["causality"].is_null(),
+        "declaration alone earns no causality"
+    );
+    assert!(mailhog["treatment"]
+        .as_str()
+        .unwrap()
+        .contains("declared-image:mailhog/mailhog"));
+
+    // The observed loopback destinations remain separate records — a
+    // port-only coincidence with a compose service must not merge (§6.6).
+    assert!(external.iter().any(|s| s["id"] == "127.0.0.1:5432"));
+    let postgres_declared = external.iter().find(|s| s["id"] == "postgres").unwrap();
+    assert_eq!(postgres_declared["identity"], "declared");
+
+    // Declares claims recorded with evidence.
+    let claims_text = std::fs::read_to_string(out.join("claims.json")).unwrap();
+    assert!(claims_text.contains("service:mailhog"));
+    let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();
+    assert!(ledger_text.contains("compose-service-declared"));
+}
+
+#[test]
+fn successful_package_opens_promote_loaded_state() {
+    let out = temp_out("loaded");
+    let repo = temp_out("loaded-repo");
+    // A repo declaring `requests`, whose workload opens the installed
+    // package's files under a site-packages layout.
+    std::fs::create_dir_all(repo.join(".venv/lib/python3.11/site-packages/requests")).unwrap();
+    std::fs::create_dir_all(repo.join(".venv/lib/python3.11/site-packages/unrelated")).unwrap();
+    std::fs::write(
+        repo.join("requirements.txt"),
+        "requests==2.31.0\nflask==3.0.0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".venv/lib/python3.11/site-packages/requests/__init__.py"),
+        "# fixture module\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("run.sh"),
+        "cat .venv/lib/python3.11/site-packages/requests/__init__.py > /dev/null\n",
+    )
+    .unwrap();
+    let (ok, _, stderr) = run_ovid(&[
+        "observe",
+        repo.to_str().unwrap(),
+        "--run",
+        "sh run.sh",
+        "--in-place",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "observe failed: {stderr}");
+    let manifest = load_manifest(&out);
+    let components = manifest["inventory"]["components"].as_array().unwrap();
+    let requests = components.iter().find(|c| c["name"] == "requests").unwrap();
+    assert_eq!(
+        requests["states"]["loaded"], true,
+        "opened package must be promoted to loaded: {requests}"
+    );
+    // §6.3: loading never implies execution; and the unopened declared
+    // package stays unloaded.
+    assert!(requests["states"]["exercised"].is_null());
+    let flask = components.iter().find(|c| c["name"] == "flask").unwrap();
+    assert!(
+        flask["states"]["loaded"].is_null(),
+        "unopened package must stay unloaded"
+    );
+    // The loads claim links to the open evidence.
+    let claims_text = std::fs::read_to_string(out.join("claims.json")).unwrap();
+    assert!(claims_text.contains("\"loads\""), "loads claim recorded");
+}

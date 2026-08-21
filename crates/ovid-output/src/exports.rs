@@ -154,6 +154,7 @@ mod tests {
             dns_name: Some("orders-db".into()),
             endpoints: vec!["10.0.0.5".into()],
             identity: "dns-name".into(),
+            declared: false,
             attempts: 2,
             failures: 2,
             outcomes: vec!["ECONNREFUSED".into()],

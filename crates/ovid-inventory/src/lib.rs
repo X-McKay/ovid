@@ -13,6 +13,7 @@
 //! [`provider`] module defines the contract external SBOM providers plug
 //! into.
 
+pub mod compose;
 pub mod languages;
 pub mod provider;
 pub mod purl;
@@ -21,6 +22,7 @@ pub mod scanners;
 use ovid_repository::RepoSnapshot;
 use serde::{Deserialize, Serialize};
 
+pub use compose::{scan_compose, DeclaredService};
 pub use languages::{detect_languages, LanguageStat};
 pub use purl::purl;
 

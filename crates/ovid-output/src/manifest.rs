@@ -158,11 +158,16 @@ pub struct ExternalSystemReport {
     /// dependency typically has several).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
-    /// How the dependency is identified: `dns-name` (name observed) or
+    /// How the dependency is identified: `dns-name` (name observed),
     /// `ip-only` (no DNS observation was available — absence of a name is
-    /// explicitly unknown, not "nameless", §25.3).
+    /// explicitly unknown, not "nameless", §25.3), or `declared`
+    /// (named by repository metadata such as a Compose file, unobserved).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub identity: String,
+    /// Whether repository metadata (e.g. a Compose service) declares this
+    /// dependency, independent of observation.
+    #[serde(default)]
+    pub declared: bool,
     pub attempts: u64,
     pub failures: u64,
     #[serde(default)]

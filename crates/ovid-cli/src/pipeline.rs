@@ -207,6 +207,123 @@ fn record_inventory(
     Ok(())
 }
 
+/// Extract a package identity from a file path under a known package
+/// installation layout (spec §14.7's package-load rule). Best-effort:
+/// import names and distribution names can differ (e.g. PyYAML installs
+/// `yaml/`); `.dist-info` opens carry the true distribution name and are
+/// matched too. Returns lowercase, `_`->`-` normalized names.
+fn package_from_install_path(path: &str) -> Option<String> {
+    let normalize = |name: &str| name.to_lowercase().replace('_', "-");
+    // Python: …/site-packages/<pkg>/… , <pkg>.py , <dist>-<ver>.dist-info
+    if let Some(rest) = path
+        .split("/site-packages/")
+        .nth(1)
+        .or_else(|| path.split("/dist-packages/").nth(1))
+    {
+        let first = rest.split('/').next()?;
+        if let Some(dist_info) = first.strip_suffix(".dist-info") {
+            // `<name>-<version>.dist-info`
+            let name = dist_info
+                .rsplit_once('-')
+                .map(|(n, _)| n)
+                .unwrap_or(dist_info);
+            return Some(normalize(name));
+        }
+        let module = first.strip_suffix(".py").unwrap_or(first);
+        if module.is_empty() || module.starts_with('_') || module == "pkg_resources" {
+            return None;
+        }
+        return Some(normalize(module));
+    }
+    // Node: …/node_modules/<name>/… or …/node_modules/@scope/<name>/…
+    if let Some(rest) = path.split("/node_modules/").nth(1) {
+        let mut parts = rest.split('/');
+        let first = parts.next()?;
+        if first.starts_with('@') {
+            let second = parts.next()?;
+            return Some(format!("{first}/{second}").to_lowercase());
+        }
+        return Some(first.to_lowercase());
+    }
+    // Ruby: …/gems/<name>-<version>/…
+    if let Some(rest) = path.split("/gems/").nth(1) {
+        let dir = rest.split('/').next()?;
+        if let Some((name, version)) = dir.rsplit_once('-') {
+            if version.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return Some(normalize(name));
+            }
+        }
+    }
+    None
+}
+
+/// Absorb Compose-declared services (FR-011 container metadata) into the
+/// manifest: merged onto an observed system when the identity matches,
+/// appended as a declared-only record otherwise. Declaration never sets
+/// dynamic states (§6.3).
+fn absorb_declared_services(
+    ctx: &mut Context,
+    manifest: &mut Manifest,
+    snapshot: &RepoSnapshot,
+) -> Result<()> {
+    let services = ovid_inventory::scan_compose(snapshot);
+    let repo_subject = format!("repository:{}", snapshot.canonical_url);
+    for service in services {
+        let evidence_id = ctx.record(
+            "compose-service-declared",
+            "ovid-inventory",
+            TrustTier::T4,
+            serde_json::to_value(&service)?,
+            None,
+        )?;
+        ctx.claim(
+            "declares",
+            repo_subject.clone(),
+            format!("service:{}", service.name),
+            ClaimStates::default().with(ClaimState::Declared),
+            vec![evidence_id.clone()],
+        );
+        // Merge onto an observed system whose DNS name or id matches the
+        // compose service name (the docker-network alias case). Anything
+        // weaker (port-only) would be guessing (§6.6).
+        if let Some(existing) = manifest
+            .external_systems
+            .iter_mut()
+            .find(|s| s.id == service.name || s.dns_name.as_deref() == Some(service.name.as_str()))
+        {
+            existing.declared = true;
+            existing.evidence.push(evidence_id.to_string());
+            continue;
+        }
+        let port = service.ports.first().copied().unwrap_or(0);
+        let protocol = ctx
+            .registry
+            .classify_protocol(port, None)
+            .map(|(_, p)| p.system.clone())
+            .unwrap_or_else(|| "unknown".into());
+        manifest.external_systems.push(ExternalSystemReport {
+            id: service.name.clone(),
+            protocol,
+            address: service.name.clone(),
+            port,
+            dns_name: Some(service.name.clone()),
+            endpoints: Vec::new(),
+            identity: "declared".into(),
+            declared: true,
+            attempts: 0,
+            failures: 0,
+            outcomes: Vec::new(),
+            causality: None,
+            treatment: service
+                .image
+                .clone()
+                .map(|image| format!("declared-image:{image}")),
+            evidence: vec![evidence_id.to_string()],
+        });
+    }
+    Ok(())
+}
+
 /// Outcome of one observed workload execution.
 struct WorkloadExecution {
     run_id: OvidId,
@@ -429,6 +546,7 @@ fn absorb_execution(
             } else {
                 "ip-only".into()
             },
+            declared: false,
             attempts: observation.attempts,
             failures: observation.failures,
             outcomes: observation.outcomes.clone(),
@@ -546,6 +664,49 @@ fn absorb_execution(
         let _ = seen; // reserved for future build-section enrichment
     }
 
+    // Package-load normalization (spec §14.7): a successful open of a
+    // file under a known package installation path is package-load
+    // evidence. Promotes `loaded` on matching inventory components and
+    // records a `loads` claim — never `exercised` (§6.3: execution is a
+    // stronger statement than loading).
+    if let Some(observation) = &execution.result.observation {
+        let mut loaded: BTreeMap<String, OvidId> = BTreeMap::new(); // package name -> first evidence
+        for envelope in &observation.events {
+            let path = match &envelope.event {
+                BoundaryEvent::FileOpened {
+                    path,
+                    errno: None,
+                    write: false,
+                } => path,
+                BoundaryEvent::SharedObjectMapped { path } => path,
+                _ => continue,
+            };
+            if let Some(package) = package_from_install_path(path) {
+                if let Some(ledger_id) =
+                    execution.event_evidence.get(&envelope.event_id.to_string())
+                {
+                    loaded.entry(package).or_insert_with(|| ledger_id.clone());
+                }
+            }
+        }
+        for component in &mut manifest.inventory.components {
+            if component.states.loaded {
+                continue;
+            }
+            let key = component.name.to_lowercase().replace('_', "-");
+            if let Some(evidence_id) = loaded.get(&key) {
+                component.states.loaded = true;
+                ctx.claim(
+                    "loads",
+                    workload_subject.clone(),
+                    format!("package:{}", component.purl),
+                    ClaimStates::default().with(ClaimState::Loaded),
+                    vec![evidence_id.clone()],
+                );
+            }
+        }
+    }
+
     // Artifact outputs: newly created files under conventional output dirs.
     for created in ["target", "build", "dist", "out"] {
         let dir = execution.result.workspace_path.join(created);
@@ -627,6 +788,7 @@ pub fn run_inventory(
         .completeness
         .limitations
         .push("inventory mode: no code was executed; dynamic states are unknown".into());
+    absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, None)?;
     Ok(Bundle {
         manifest,
@@ -688,6 +850,7 @@ pub fn run_observe(
             .limitations
             .push("strace unavailable: boundary observation was not captured".into());
     }
+    absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, None)?;
     Ok(Bundle {
         manifest,
@@ -862,6 +1025,7 @@ pub fn run_analyze(
         .completeness
         .limitations
         .push("dynamic analysis is limited to the executed workloads".into());
+    absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, lock.as_ref())?;
     Ok(Bundle {
         manifest,
@@ -1258,6 +1422,7 @@ pub fn run_tomography(
         .completeness
         .limitations
         .push("dynamic analysis is limited to the executed workloads".into());
+    absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, lock.as_ref())?;
     Ok(Bundle {
         manifest,

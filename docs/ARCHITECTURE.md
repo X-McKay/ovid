@@ -70,6 +70,15 @@ explicitly marked `ip-only` in the manifest — absence of a name is
 reported as unknown, never hidden (§25.3). In MicroVM mode the gateway
 serves DNS and supplies the same identities authoritatively.
 
+Two §14.7 normalizers close the static/dynamic gap without crossing it:
+successful opens under known package install layouts (`site-packages/`,
+`node_modules/`, gem dirs — including `.dist-info` names, since import
+and distribution names can differ) promote matching inventory components
+to `loaded` with a `loads` claim (never `exercised`); and Compose files
+are parsed into *declared* external systems (service, image, container
+ports) that merge with observed destinations only on a name match —
+port-only coincidence stays two records (§6.6).
+
 ## Resolution and causality
 
 After each run, `ovid-gateway` groups socket events into external-system
