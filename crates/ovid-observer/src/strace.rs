@@ -32,8 +32,13 @@ pub struct StraceObserver;
 /// socket boundaries only. stat/access are included because every modern
 /// shell and make performs PATH lookups with stat-family probes rather
 /// than execve loops — a missing tool is visible *only* as a stat miss.
+/// The datagram send/receive family is traced so resolver traffic can be
+/// decoded into DNS name evidence (FR-033); on x86_64, libc `send`/`recv`
+/// compile down to `sendto`/`recvfrom`, so this also covers connected UDP
+/// sockets. Only payloads on port-53 peers are parsed.
 const TRACE_SET: &str = "execve,execveat,openat,open,creat,newfstatat,statx,access,faccessat,\
-                         faccessat2,connect,bind,listen,socket,exit_group";
+                         faccessat2,connect,bind,listen,socket,sendto,sendmsg,sendmmsg,\
+                         recvfrom,recvmsg,exit_group";
 
 impl BoundaryObserver for StraceObserver {
     fn name(&self) -> &'static str {
@@ -74,21 +79,12 @@ impl BoundaryObserver for StraceObserver {
             report.raw_line_count += 1;
             match parser.parse_line(&line) {
                 LineOutcome::Event(pid, event) => {
-                    report.events.push(EventEnvelope {
-                        event_id: ids.next("evidence"),
-                        run_id: run_id.clone(),
-                        sequence: report.events.len() as u64,
-                        wall_time: Some(chrono::Utc::now()),
-                        provider: self.name().to_string(),
-                        provider_version: self.version().to_string(),
-                        trust_tier: TrustTier::T2,
-                        process: Some(ProcessIdentity {
-                            pid,
-                            parent_pid: None,
-                            executable: parser.executables.get(&pid).cloned(),
-                        }),
-                        event,
-                    });
+                    push_event(&mut report, ids, run_id, self, &parser, pid, event);
+                }
+                LineOutcome::Events(pid, events) => {
+                    for event in events {
+                        push_event(&mut report, ids, run_id, self, &parser, pid, event);
+                    }
                 }
                 LineOutcome::Ignored => {}
                 LineOutcome::Unparsed => report.unparsed_lines += 1,
@@ -98,8 +94,38 @@ impl BoundaryObserver for StraceObserver {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_event(
+    report: &mut ObservationReport,
+    ids: &IdGenerator,
+    run_id: &OvidId,
+    observer: &StraceObserver,
+    parser: &Parser,
+    pid: u32,
+    event: BoundaryEvent,
+) {
+    report.events.push(EventEnvelope {
+        event_id: ids.next("evidence"),
+        run_id: run_id.clone(),
+        sequence: report.events.len() as u64,
+        wall_time: Some(chrono::Utc::now()),
+        provider: observer.name().to_string(),
+        provider_version: observer.version().to_string(),
+        trust_tier: TrustTier::T2,
+        process: Some(ProcessIdentity {
+            pid,
+            parent_pid: None,
+            executable: parser.executables.get(&pid).cloned(),
+        }),
+        event,
+    });
+}
+
 enum LineOutcome {
     Event(u32, BoundaryEvent),
+    /// One line can yield several events (a DNS response carries multiple
+    /// answer records).
+    Events(u32, Vec<BoundaryEvent>),
     Ignored,
     Unparsed,
 }
@@ -110,6 +136,10 @@ struct Parser {
     unfinished: HashMap<(u32, String), String>,
     /// (pid, fd) -> (address, port) from bind, consumed by listen.
     bound: HashMap<(u32, i32), (String, u16)>,
+    /// (pid, fd) -> resolver address, from connects to port 53. Lets
+    /// send/recv on connected resolver sockets (which carry no sockaddr in
+    /// the trace line) be attributed to their server.
+    dns_peers: HashMap<(u32, i32), String>,
     /// pid -> last successfully exec'd executable.
     executables: HashMap<u32, String>,
 }
@@ -129,6 +159,7 @@ fn regexes() -> &'static Regexes {
         unix_path: re(r#"sun_path="([^"]+)""#),
         result: re(r#"\)\s*=\s*(-?\d+)(?:\s+(\w+))?"#),
         fd_prefix: re(r#"^(?:connect|bind|listen)\((\d+)"#),
+        data_fd: re(r#"^(?:sendto|sendmsg|sendmmsg|recvfrom|recvmsg)\((\d+)"#),
         exited: re(r#"^\+\+\+ exited with (\d+) \+\+\+$"#),
         killed: re(r#"^\+\+\+ killed by (\w+)"#),
     })
@@ -143,6 +174,7 @@ struct Regexes {
     unix_path: Regex,
     result: Regex,
     fd_prefix: Regex,
+    data_fd: Regex,
     exited: Regex,
     killed: Regex,
 }
@@ -275,6 +307,15 @@ impl Parser {
                     .captures(rest)
                     .and_then(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_string()))
                     .unwrap_or_else(|| "unknown".to_string());
+                // Remember resolver sockets: later send/recv on the same
+                // (pid, fd) carries DNS payloads with no sockaddr.
+                if port == 53 {
+                    if let Some(fd_caps) = r.fd_prefix.captures(rest) {
+                        if let Ok(fd) = fd_caps[1].parse::<i32>() {
+                            self.dns_peers.insert((pid, fd), address.clone());
+                        }
+                    }
+                }
                 return LineOutcome::Event(
                     pid,
                     BoundaryEvent::SocketConnect {
@@ -325,11 +366,88 @@ impl Parser {
             return LineOutcome::Ignored;
         }
 
+        // Datagram traffic: parse DNS payloads on port-53 peers only.
+        if rest.starts_with("sendto(")
+            || rest.starts_with("sendmsg(")
+            || rest.starts_with("sendmmsg(")
+            || rest.starts_with("recvfrom(")
+            || rest.starts_with("recvmsg(")
+        {
+            return self.parse_datagram(pid, rest);
+        }
+
         if rest.starts_with("socket(") || rest.starts_with("exit_group(") {
             return LineOutcome::Ignored;
         }
 
         LineOutcome::Unparsed
+    }
+
+    /// Decode DNS traffic from a sendto/sendmsg/sendmmsg/recvfrom/recvmsg
+    /// line. The peer comes from an explicit sockaddr in the line
+    /// (unconnected sockets) or from the tracked port-53 connect on the
+    /// same (pid, fd). Non-resolver datagram traffic is ignored.
+    fn parse_datagram(&mut self, pid: u32, rest: &str) -> LineOutcome {
+        let r = regexes();
+        let fd = r
+            .data_fd
+            .captures(rest)
+            .and_then(|caps| caps[1].parse::<i32>().ok())
+            .unwrap_or(-1);
+        let server = if let Some(port_caps) = r.inet.captures(rest) {
+            // Explicit sockaddr present: only port 53 is resolver traffic.
+            let port: u16 = port_caps[1].parse().unwrap_or(0);
+            if port != 53 {
+                return LineOutcome::Ignored;
+            }
+            let address = r
+                .inet_addr
+                .captures(rest)
+                .and_then(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_string()));
+            if let (Some(address), true) = (&address, fd >= 0) {
+                self.dns_peers.insert((pid, fd), address.clone());
+            }
+            address
+        } else {
+            match self.dns_peers.get(&(pid, fd)) {
+                Some(address) => Some(address.clone()),
+                None => return LineOutcome::Ignored, // not a resolver socket
+            }
+        };
+
+        let mut events = Vec::new();
+        for quoted in crate::dns::extract_quoted_strings(rest) {
+            // Skip the sockaddr's own quoted address string.
+            if Some(quoted) == server.as_deref() {
+                continue;
+            }
+            let bytes = crate::dns::decode_strace_bytes(quoted);
+            let Some(packet) = crate::dns::parse_dns_packet(&bytes) else {
+                continue;
+            };
+            if packet.is_response {
+                for answer in &packet.answers {
+                    events.push(BoundaryEvent::DnsQuery {
+                        name: packet.question.clone(),
+                        answer: Some(answer.to_string()),
+                        decision: None,
+                        server: server.clone(),
+                    });
+                }
+            } else {
+                events.push(BoundaryEvent::DnsQuery {
+                    name: packet.question.clone(),
+                    answer: None,
+                    decision: None,
+                    server: server.clone(),
+                });
+            }
+        }
+        if events.is_empty() {
+            LineOutcome::Ignored
+        } else {
+            LineOutcome::Events(pid, events)
+        }
     }
 
     fn call_result(&self, rest: &str) -> (i64, Option<String>) {
@@ -514,6 +632,70 @@ mod tests {
                 BoundaryEvent::FileOpened { errno: Some(err), .. } if err == "ENOENT"
             ));
         }
+        assert_eq!(report.unparsed_lines, 0);
+    }
+
+    #[test]
+    fn dns_query_and_response_on_unconnected_socket() {
+        // glibc-style: sendto/recvfrom with explicit sockaddr on port 53.
+        // Query for temporal.download, response with two A records via a
+        // compression pointer.
+        let report = collect_from(concat!(
+            "800   sendto(6, \"\\270\\204\\1\\0\\0\\1\\0\\0\\0\\0\\0\\0\\10temporal\\10download\\0\\0\\1\\0\\1\", 35, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"8.8.8.8\")}, 16) = 35\n",
+            "800   recvfrom(6, \"\\270\\204\\201\\200\\0\\1\\0\\2\\0\\0\\0\\0\\10temporal\\10download\\0\\0\\1\\0\\1\\300\\14\\0\\1\\0\\1\\0\\0\\0<\\0\\4h\\25\\33S\\300\\14\\0\\1\\0\\1\\0\\0\\0<\\0\\4\\254C\\215\\330\", 512, 0, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"8.8.8.8\")}, [16]) = 67\n",
+        ));
+        let dns: Vec<_> = report
+            .events
+            .iter()
+            .filter_map(|e| match &e.event {
+                BoundaryEvent::DnsQuery {
+                    name,
+                    answer,
+                    server,
+                    ..
+                } => Some((name.clone(), answer.clone(), server.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dns.len(), 3, "one query + two answers: {dns:?}");
+        assert!(dns.iter().all(|(name, _, server)| {
+            name == "temporal.download" && server.as_deref() == Some("8.8.8.8")
+        }));
+        let answers: Vec<_> = dns.iter().filter_map(|(_, a, _)| a.clone()).collect();
+        assert_eq!(answers, vec!["104.21.27.83", "172.67.141.216"]);
+    }
+
+    #[test]
+    fn dns_on_connected_socket_uses_tracked_peer() {
+        // Connected-UDP style: connect to 8.8.8.8:53, then sendto with
+        // NULL sockaddr — the peer must come from the tracked fd.
+        let report = collect_from(concat!(
+            "801   connect(7, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"8.8.8.8\")}, 16) = 0\n",
+            "801   sendto(7, \"\\270\\204\\1\\0\\0\\1\\0\\0\\0\\0\\0\\0\\7example\\3com\\0\\0\\1\\0\\1\", 29, MSG_NOSIGNAL, NULL, 0) = 29\n",
+        ));
+        let query = report
+            .events
+            .iter()
+            .find_map(|e| match &e.event {
+                BoundaryEvent::DnsQuery { name, server, .. } => {
+                    Some((name.clone(), server.clone()))
+                }
+                _ => None,
+            })
+            .expect("query captured from connected socket");
+        assert_eq!(query.0, "example.com");
+        assert_eq!(query.1.as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn non_dns_datagrams_are_ignored() {
+        let report = collect_from(concat!(
+            // UDP to a non-53 port: not resolver traffic.
+            "802   sendto(9, \"hello\", 5, 0, {sa_family=AF_INET, sin_port=htons(9999), sin_addr=inet_addr(\"10.0.0.1\")}, 16) = 5\n",
+            // Untracked fd with no sockaddr: cannot be attributed.
+            "802   sendto(4, \"\\1\\2\\3\", 3, 0, NULL, 0) = 3\n",
+        ));
+        assert!(report.events.is_empty());
         assert_eq!(report.unparsed_lines, 0);
     }
 

@@ -429,3 +429,57 @@ fn counterfactual_env_classifies_required_variable() {
     let claims_text = std::fs::read_to_string(out.join("claims.json")).unwrap();
     assert!(claims_text.contains("environment:OVID_IT_MODE"));
 }
+
+#[test]
+fn tomography_runs_offline_online_pair_and_classifies() {
+    let out = temp_out("tomography");
+    let fixture = fixtures().join("network-caller");
+    let (ok, stdout, stderr) = run_ovid(&[
+        "tomography",
+        fixture.to_str().unwrap(),
+        "--workloads",
+        "test",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "tomography failed: {stderr}\n{stdout}");
+    let manifest = load_manifest(&out);
+    assert_eq!(manifest["analysis"]["mode"], "tomography");
+
+    // Both runs are recorded as workloads and both pass (the fixture
+    // tolerates its unavailable loopback dependencies).
+    let workloads = manifest["workloads"].as_array().unwrap();
+    let names: Vec<&str> = workloads
+        .iter()
+        .map(|w| w["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"test-offline") && names.contains(&"test-online"),
+        "{names:?}"
+    );
+    assert!(
+        workloads.iter().all(|w| w["status"] == "passed"),
+        "{workloads:?}"
+    );
+
+    // Loopback services refused in both runs + workload passed offline:
+    // the natural counterfactual classifies them optional.
+    let external = manifest["external_systems"].as_array().unwrap();
+    let db = external
+        .iter()
+        .find(|s| s["port"] == 5432)
+        .expect("postgres observed");
+    assert_eq!(db["causality"], "optional");
+    assert_eq!(db["identity"], "ip-only", "loopback IPs carry no DNS name");
+
+    // The counterfactual experiment is in the ledger with its condition.
+    let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();
+    assert!(
+        ledger_text.contains("network-isolated"),
+        "experiment evidence recorded"
+    );
+
+    // One complete bundle: world lock + compose from the online run.
+    assert!(out.join("world.lock.yaml").exists());
+    assert!(out.join("compose.yaml").exists());
+}

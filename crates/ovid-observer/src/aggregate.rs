@@ -62,7 +62,9 @@ fn signature(event: &BoundaryEvent) -> String {
         BoundaryEvent::UnixSocketConnected { path, result } => {
             format!("unix-connect|{path}|{}", result.as_deref().unwrap_or("?"))
         }
-        BoundaryEvent::DnsQuery { name, .. } => format!("dns|{name}"),
+        BoundaryEvent::DnsQuery { name, answer, .. } => {
+            format!("dns|{name}|{}", answer.as_deref().unwrap_or("query"))
+        }
         // Everything else is a state transition; never collapse.
         other => format!("unique|{}|{}", other.type_label(), fastrand_counter()),
     }

@@ -54,9 +54,21 @@ Captured events (spec §13.7): exec success/failure, file opens and
 misses, **stat/access misses** (modern shells and make locate tools with
 stat-family PATH scans, not execve loops — a missing tool is visible only
 as a stat miss), shared-object loads, socket connect results,
-bind/listen, Unix sockets, process exits. Unparsed lines are counted,
-never silently dropped (§27.5); aggregation collapses repeated successes
-but preserves every failure signature and accounts for all drops (§32.5).
+bind/listen, Unix sockets, **DNS queries and answers** (datagram payloads
+on port-53 peers are decoded by a bounds-checked wire-format parser in
+`ovid-observer/src/dns.rs`, FR-033), and process exits. Unparsed lines
+are counted, never silently dropped (§27.5); aggregation collapses
+repeated successes but preserves every failure signature and accounts
+for all drops (§32.5).
+
+DNS answers feed name identity into network analysis: external
+observations are grouped by hostname (one logical dependency across CDN
+address rotation, with an `endpoints` list), resolver servers are
+surfaced so the pipeline can flag resolver bypass against
+`/etc/resolv.conf`, and destinations with no observed resolution are
+explicitly marked `ip-only` in the manifest — absence of a name is
+reported as unknown, never hidden (§25.3). In MicroVM mode the gateway
+serves DNS and supplies the same identities authoritatively.
 
 ## Resolution and causality
 
@@ -80,7 +92,14 @@ Causality is strictly counterfactual (spec §20):
   group-then-individual removal with repeat-based nondeterminism policy
   (§20.4–§20.6); unstable results become `unresolved`, never guessed.
   In local process mode the solver runs against simulated/world-runner
-  backends; full service-cell minimization requires the MicroVM worker.
+  backends; full service-cell minimization requires the MicroVM worker;
+- `ovid tomography` runs each workload as an offline/online pair
+  (isolated namespace vs. network access) and classifies dependencies
+  from the comparison (`ovid-experiment/src/network.rs`): `required`
+  only when exactly one externally-controlled dependency changed
+  availability and flipped the outcome; when several changed together
+  the verdict is group-level and each member stays `unresolved`, with
+  the group named in the limitations (§20.4's coupling rule).
 
 ## Execution backends
 
@@ -91,6 +110,10 @@ repositories" on any Linux host:
 
 - scrubbed environment (fixed PATH, workspace-scoped HOME/TMPDIR; host
   variables only via explicit `--inherit-env`);
+- optional **network isolation** (`NetworkMode::Isolated`): the workload
+  runs in an unprivileged user+network namespace — loopback up, no
+  external routes — giving the process backend a real deny-all egress
+  condition (FR-041) for counterfactual experiments;
 - ephemeral copy-on-write workspaces — each run starts clean and the
   checkout is never modified (FR-025 semantics);
 - process-group supervision with wall-clock deadlines, RLIMIT_CPU and

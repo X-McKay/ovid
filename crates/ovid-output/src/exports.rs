@@ -152,6 +152,8 @@ mod tests {
             address: "10.0.0.5".into(),
             port: 5432,
             dns_name: Some("orders-db".into()),
+            endpoints: vec!["10.0.0.5".into()],
+            identity: "dns-name".into(),
             attempts: 2,
             failures: 2,
             outcomes: vec!["ECONNREFUSED".into()],

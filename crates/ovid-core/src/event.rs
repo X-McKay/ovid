@@ -90,6 +90,11 @@ pub enum BoundaryEvent {
         /// `nxdomain`, `blocked`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decision: Option<String>,
+        /// Resolver server the query was sent to, when observed. Lets the
+        /// analysis flag resolver bypass (queries to servers not in
+        /// `/etc/resolv.conf`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
     },
     /// A build/workload output artifact.
     ArtifactCreated {

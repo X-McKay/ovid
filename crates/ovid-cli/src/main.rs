@@ -94,6 +94,32 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Full tomography: discover workloads, run each twice (isolated
+    /// network, then with network), classify external dependencies from
+    /// the counterfactual pair, and emit one complete bundle.
+    Tomography {
+        locator: String,
+        #[arg(long = "ref")]
+        reference: Option<String>,
+        /// Workload kinds to attempt, in order.
+        #[arg(long, default_value = "test")]
+        workloads: String,
+        #[arg(long, default_value = "ovid-output")]
+        out: PathBuf,
+        #[arg(long)]
+        in_place: bool,
+        /// Host environment variables to pass through to the online run
+        /// (the offline run is network-isolated).
+        #[arg(long = "inherit-env")]
+        inherit_env: Vec<String>,
+        /// Per-run wall-clock timeout in seconds.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        #[arg(long = "packs-dir")]
+        packs_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Explain a claim by traversing to its evidence (FR-110).
     Explain {
         /// Claim id, e.g. `claim:...`, or a search term.
@@ -220,6 +246,39 @@ fn main() -> Result<()> {
                 counterfactual_env,
             };
             let bundle = pipeline::run_analyze(
+                &locator,
+                reference,
+                &kinds,
+                &out,
+                &options,
+                packs_dir.as_deref(),
+            )?;
+            if json {
+                println!("{}", bundle.manifest.to_json_pretty());
+            } else {
+                pipeline::print_summary(&bundle);
+            }
+            Ok(())
+        }
+        Command::Tomography {
+            locator,
+            reference,
+            workloads,
+            out,
+            in_place,
+            inherit_env,
+            timeout,
+            packs_dir,
+            json,
+        } => {
+            let kinds: Vec<String> = workloads.split(',').map(|s| s.trim().to_string()).collect();
+            let options = pipeline::ExecutionOptions {
+                in_place,
+                inherit_env,
+                timeout_seconds: timeout,
+                counterfactual_env: vec![],
+            };
+            let bundle = pipeline::run_tomography(
                 &locator,
                 reference,
                 &kinds,

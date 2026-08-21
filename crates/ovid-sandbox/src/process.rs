@@ -6,7 +6,7 @@
 //! not a security boundary for hostile code — its [`IsolationTier`] says
 //! so, and manifests carry that tier.
 
-use crate::{ExecutionBackend, IsolationTier, RunResult, RunSpec, WorkspaceMode};
+use crate::{ExecutionBackend, IsolationTier, NetworkMode, RunResult, RunSpec, WorkspaceMode};
 use ovid_core::{IdGenerator, OvidError};
 use ovid_observer::{BoundaryObserver, StraceObserver};
 use std::io::Read;
@@ -40,6 +40,40 @@ impl ProcessBackend {
         copy_tree(source_root, &workspace)?;
         Ok(workspace)
     }
+}
+
+/// Whether this host supports unprivileged user+network namespaces.
+pub fn network_isolation_available() -> bool {
+    Command::new("unshare")
+        .args(["-r", "-n", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Wrap `argv` in a fresh user+network namespace: no external routes, and
+/// loopback brought up (via `ip` when present, else a python ioctl, else
+/// left down) so 127.0.0.1 services inside the workload keep working.
+fn isolate_network(argv: &[String]) -> Vec<String> {
+    const LO_UP: &str = concat!(
+        "ip link set lo up 2>/dev/null || ",
+        "python3 -c 'import socket,fcntl,struct;",
+        "s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);",
+        "fcntl.ioctl(s.fileno(),0x8914,struct.pack(\"16sH14s\",b\"lo\",0x41,b\"\\0\"*14))' ",
+        "2>/dev/null || true; exec \"$0\" \"$@\"",
+    );
+    let mut wrapped = vec![
+        "unshare".to_string(),
+        "-r".to_string(),
+        "-n".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        LO_UP.to_string(),
+    ];
+    wrapped.extend(argv.iter().cloned());
+    wrapped
 }
 
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
@@ -107,14 +141,28 @@ impl ExecutionBackend for ProcessBackend {
         std::fs::create_dir_all(workspace.join(".home"))?;
         std::fs::create_dir_all(workspace.join(".tmp"))?;
 
+        // Network isolation wraps the innermost command; observation wraps
+        // the whole thing so strace follows into the namespace.
+        let mut argv = match spec.network {
+            NetworkMode::Inherit => spec.argv.clone(),
+            NetworkMode::Isolated => {
+                if !network_isolation_available() {
+                    return Err(OvidError::UnsupportedHost(
+                        "network isolation requires unprivileged user namespaces \
+                         (`unshare -r -n`); this host does not support them"
+                            .into(),
+                    ));
+                }
+                isolate_network(&spec.argv)
+            }
+        };
+
         let trace_path = workspace.join(".ovid-trace");
         let observer = StraceObserver;
         let observing = spec.observe && ovid_observer::strace_available();
-        let argv: Vec<String> = if observing {
-            observer.wrap(&spec.argv, &trace_path)
-        } else {
-            spec.argv.clone()
-        };
+        if observing {
+            argv = observer.wrap(&argv, &trace_path);
+        }
 
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
@@ -263,6 +311,7 @@ mod tests {
                 ..Default::default()
             },
             observe: false,
+            network: crate::NetworkMode::Inherit,
         }
     }
 
@@ -329,6 +378,7 @@ mod tests {
             inherit_env: vec![],
             limits: Default::default(),
             observe: false,
+            network: crate::NetworkMode::Inherit,
         };
         let result = backend.run(&spec).unwrap();
         assert!(result.success());
@@ -339,6 +389,47 @@ mod tests {
         );
         assert!(result.workspace_path.join("created.txt").exists());
         assert!(!source.path().join("created.txt").exists());
+    }
+
+    #[test]
+    fn isolated_network_blocks_external_but_keeps_loopback() {
+        if !network_isolation_available() {
+            eprintln!("user namespaces unavailable; skipping");
+            return;
+        }
+        let backend = ProcessBackend::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // The script: loopback listen+connect must work; an external
+        // connect must fail with a network error.
+        let script = r#"
+python3 - <<'PY'
+import socket, sys
+srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+c = socket.socket(); c.settimeout(2); c.connect(srv.getsockname())
+print("loopback-ok")
+x = socket.socket(); x.settimeout(2)
+try:
+    x.connect(("192.0.2.1", 443))
+    print("external-reached"); sys.exit(1)
+except OSError:
+    print("external-blocked")
+PY
+"#;
+        let mut spec = spec_in_place(&["sh", "-c", script], dir.path());
+        spec.network = crate::NetworkMode::Isolated;
+        spec.limits.wall_time = Duration::from_secs(30);
+        let result = backend.run(&spec).unwrap();
+        assert!(result.success(), "stderr: {}", result.stderr_tail);
+        assert!(
+            result.stdout_tail.contains("loopback-ok"),
+            "{}",
+            result.stdout_tail
+        );
+        assert!(
+            result.stdout_tail.contains("external-blocked"),
+            "{}",
+            result.stdout_tail
+        );
     }
 
     #[test]

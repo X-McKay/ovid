@@ -17,7 +17,10 @@ use ovid_core::{
     TrustTier,
 };
 use ovid_evidence::{Claim, ClaimStore, EvidenceLedger, EvidenceRecord};
-use ovid_experiment::{propose_resolutions, ResolutionKind, ResolutionProposal, SuccessPredicate};
+use ovid_experiment::{
+    classify_network_counterfactual, externally_controlled, propose_resolutions,
+    NetworkCounterfactual, ResolutionKind, ResolutionProposal, SuccessPredicate,
+};
 use ovid_gateway::NetworkAnalysis;
 use ovid_inventory::InventoryReport;
 use ovid_observer::aggregate;
@@ -29,7 +32,10 @@ use ovid_output::{
 use ovid_packs::PackRegistry;
 use ovid_planner::ActionKind;
 use ovid_repository::{acquire, AcquireOptions, RepoSnapshot, RepositorySource};
-use ovid_sandbox::{ExecutionBackend, ProcessBackend, RunResult, RunSpec, WorkspaceMode};
+use ovid_sandbox::{
+    network_isolation_available, ExecutionBackend, NetworkMode, ProcessBackend, RunResult, RunSpec,
+    WorkspaceMode,
+};
 use ovid_world::{SuccessSpec, Treatment, World, WorldDependency, WorldLock, WorldStatus};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -125,6 +131,19 @@ impl Context {
     }
 }
 
+/// Nameservers configured in `/etc/resolv.conf` (the process backend
+/// shares the host resolver configuration).
+fn configured_resolvers() -> Vec<String> {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| line.trim().strip_prefix("nameserver"))
+                .map(|server| server.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn acquire_snapshot(
     locator: &str,
     reference: Option<String>,
@@ -209,6 +228,7 @@ fn execute_workload(
     argv: &[String],
     options: &ExecutionOptions,
     workload_name: &str,
+    network: NetworkMode,
 ) -> Result<WorkloadExecution> {
     let backend = ProcessBackend::new().map_err(|e| anyhow!("{e}"))?;
     let workspace = if options.in_place {
@@ -223,6 +243,7 @@ fn execute_workload(
     let mut spec = RunSpec::new(argv.to_vec(), workspace);
     spec.inherit_env = options.inherit_env.clone();
     spec.limits.wall_time = Duration::from_secs(options.timeout_seconds);
+    spec.network = network;
     let run_id = ctx.ids.next("run");
 
     let result = backend
@@ -402,6 +423,12 @@ fn absorb_execution(
             address: observation.address.clone(),
             port: observation.port,
             dns_name: observation.dns_name.clone(),
+            endpoints: observation.endpoints.clone(),
+            identity: if observation.dns_name.is_some() {
+                "dns-name".into()
+            } else {
+                "ip-only".into()
+            },
             attempts: observation.attempts,
             failures: observation.failures,
             outcomes: observation.outcomes.clone(),
@@ -409,6 +436,37 @@ fn absorb_execution(
             treatment: None,
             evidence: claim.supports.iter().map(|e| e.to_string()).collect(),
         });
+    }
+
+    // Identity honesty: destinations without a DNS observation are
+    // explicitly ip-only, and resolver bypass is surfaced (queries sent to
+    // servers not configured in /etc/resolv.conf).
+    let ip_only = execution
+        .network
+        .external
+        .iter()
+        .filter(|o| o.dns_name.is_none())
+        .count();
+    if ip_only > 0 {
+        let note = format!(
+            "{ip_only} external endpoint(s) identified by IP only (no DNS observation \
+             covered their resolution)"
+        );
+        if !manifest.completeness.limitations.contains(&note) {
+            manifest.completeness.limitations.push(note);
+        }
+    }
+    let configured = configured_resolvers();
+    for server in &execution.network.dns_servers {
+        if !configured.contains(server) && !server.starts_with("127.") {
+            let warning = format!(
+                "resolver bypass: DNS queries sent directly to {server}, which is not in \
+                 /etc/resolv.conf"
+            );
+            if !manifest.completeness.warnings.contains(&warning) {
+                manifest.completeness.warnings.push(warning);
+            }
+        }
     }
 
     // Resolution proposals become tool reports / unresolved items.
@@ -591,7 +649,14 @@ pub fn run_observe(
     record_inventory(&mut ctx, &snapshot, &report)?;
 
     let argv = vec!["sh".to_string(), "-c".to_string(), command.to_string()];
-    let execution = execute_workload(&mut ctx, &snapshot, &argv, options, "observe")?;
+    let execution = execute_workload(
+        &mut ctx,
+        &snapshot,
+        &argv,
+        options,
+        "observe",
+        NetworkMode::Inherit,
+    )?;
 
     let mut manifest = Manifest::new(
         ctx.ids.next("analysis").to_string(),
@@ -691,7 +756,14 @@ pub fn run_analyze(
             }),
             None,
         )?;
-        let execution = execute_workload(&mut ctx, &snapshot, &action.command, options, kind_name)?;
+        let execution = execute_workload(
+            &mut ctx,
+            &snapshot,
+            &action.command,
+            options,
+            kind_name,
+            NetworkMode::Inherit,
+        )?;
         let predicate = SuccessPredicate::ExitCode { expected: 0 };
         absorb_execution(
             &mut ctx,
@@ -738,6 +810,7 @@ pub fn run_analyze(
                 argv,
                 &variant_options,
                 &format!("{workload_name}-without-{variable}"),
+                NetworkMode::Inherit,
             )?;
             let variant_success = variant.result.success();
             manifest.analysis.runs.total += 1;
@@ -775,113 +848,411 @@ pub fn run_analyze(
 
     // World synthesis from the last executed workload (§14.12, proposed
     // status only: verified requires replaying in real service cells).
-    let lock = if let Some((execution, argv, _)) = &last_execution {
-        let mut world = World {
-            target: snapshot.canonical_url.clone(),
-            ..Default::default()
-        };
-        for proposal in &execution.proposals {
-            match &proposal.kind {
-                ResolutionKind::StartService {
-                    dependency_id,
-                    pack,
-                    port,
-                } => {
-                    let image = ctx
-                        .registry
-                        .service_packs()
-                        .find(|(p, _)| p.metadata.name == *pack)
-                        .map(|(_, s)| s.image.reference.clone())
-                        .unwrap_or_default();
-                    world.dependencies.push(WorldDependency {
-                        id: dependency_id.clone(),
-                        treatment: Treatment::RealService {
-                            pack: pack.clone(),
-                            image,
-                        },
-                        aliases: vec![dependency_id.clone()],
-                        port: Some(*port),
-                        environment: BTreeMap::new(),
-                    });
-                }
-                ResolutionKind::SupplyStub {
-                    dependency_id,
-                    protocol,
-                    port,
-                } => {
-                    world.dependencies.push(WorldDependency {
-                        id: dependency_id.clone(),
-                        treatment: Treatment::Stub {
-                            protocol: protocol.clone(),
-                        },
-                        aliases: vec![dependency_id.clone()],
-                        port: Some(*port),
-                        environment: BTreeMap::new(),
-                    });
-                }
-                ResolutionKind::LeaveUnresolved {
-                    dependency_id,
-                    reason,
-                } => {
-                    if !dependency_id.starts_with("tool:") {
-                        world.dependencies.push(WorldDependency {
-                            id: dependency_id.clone(),
-                            treatment: Treatment::Unresolved {
-                                reason: reason.clone(),
-                            },
-                            aliases: vec![dependency_id.clone()],
-                            port: None,
-                            environment: BTreeMap::new(),
-                        });
-                    }
-                }
-                ResolutionKind::InstallTool { executable, .. } => {
-                    if !world.tools.contains(executable) {
-                        world.tools.push(executable.clone());
-                    }
-                }
-                ResolutionKind::ProvideFile { .. } => {}
+    let lock = last_execution.as_ref().map(|(execution, argv, _)| {
+        synthesize_world(
+            &ctx,
+            &mut manifest,
+            &execution.proposals,
+            &snapshot.canonical_url,
+            argv,
+        )
+    });
+
+    manifest
+        .completeness
+        .limitations
+        .push("dynamic analysis is limited to the executed workloads".into());
+    finalize(&mut ctx, &mut manifest, lock.as_ref())?;
+    Ok(Bundle {
+        manifest,
+        out_dir: out.to_path_buf(),
+        lock,
+    })
+}
+
+/// Build a proposed world lock from resolution proposals and record it in
+/// the manifest (shared by analyze and tomography modes).
+fn synthesize_world(
+    ctx: &Context,
+    manifest: &mut Manifest,
+    proposals: &[ResolutionProposal],
+    target: &str,
+    argv: &[String],
+) -> WorldLock {
+    let mut world = World {
+        target: target.to_string(),
+        ..Default::default()
+    };
+    for proposal in proposals {
+        match &proposal.kind {
+            ResolutionKind::StartService {
+                dependency_id,
+                pack,
+                port,
+            } => {
+                let image = ctx
+                    .registry
+                    .service_packs()
+                    .find(|(p, _)| p.metadata.name == *pack)
+                    .map(|(_, s)| s.image.reference.clone())
+                    .unwrap_or_default();
+                world.dependencies.push(WorldDependency {
+                    id: dependency_id.clone(),
+                    treatment: Treatment::RealService {
+                        pack: pack.clone(),
+                        image,
+                    },
+                    aliases: vec![dependency_id.clone()],
+                    port: Some(*port),
+                    environment: BTreeMap::new(),
+                });
             }
+            ResolutionKind::SupplyStub {
+                dependency_id,
+                protocol,
+                port,
+            } => {
+                world.dependencies.push(WorldDependency {
+                    id: dependency_id.clone(),
+                    treatment: Treatment::Stub {
+                        protocol: protocol.clone(),
+                    },
+                    aliases: vec![dependency_id.clone()],
+                    port: Some(*port),
+                    environment: BTreeMap::new(),
+                });
+            }
+            ResolutionKind::LeaveUnresolved {
+                dependency_id,
+                reason,
+            } => {
+                if !dependency_id.starts_with("tool:") {
+                    world.dependencies.push(WorldDependency {
+                        id: dependency_id.clone(),
+                        treatment: Treatment::Unresolved {
+                            reason: reason.clone(),
+                        },
+                        aliases: vec![dependency_id.clone()],
+                        port: None,
+                        environment: BTreeMap::new(),
+                    });
+                }
+            }
+            ResolutionKind::InstallTool { executable, .. } => {
+                if !world.tools.contains(executable) {
+                    world.tools.push(executable.clone());
+                }
+            }
+            ResolutionKind::ProvideFile { .. } => {}
         }
-        let mut lock =
-            WorldLock::from_world(&world, argv.clone(), SuccessSpec::ExitCode { expected: 0 });
-        lock.status = WorldStatus::Proposed;
-        manifest.world.status = "proposed".into();
-        manifest.world.lock_digest = Some(lock.metadata.digest.clone());
-        manifest.world.dependencies = world
+    }
+    let mut lock =
+        WorldLock::from_world(&world, argv.to_vec(), SuccessSpec::ExitCode { expected: 0 });
+    lock.status = WorldStatus::Proposed;
+    manifest.world.status = "proposed".into();
+    manifest.world.lock_digest = Some(lock.metadata.digest.clone());
+    manifest.world.dependencies = world
+        .dependencies
+        .iter()
+        .map(|d| WorldDependencySummary {
+            id: d.id.clone(),
+            treatment: match &d.treatment {
+                Treatment::RealService { pack, .. } => format!("service-pack:{pack}"),
+                Treatment::Stub { protocol } => format!("stub:{protocol}"),
+                Treatment::Fixture { path } => format!("fixture:{path}"),
+                Treatment::FleetRepository { analysis } => format!("fleet:{analysis}"),
+                Treatment::Absent => "absent".into(),
+                Treatment::Unresolved { reason } => format!("unresolved:{reason}"),
+            },
+        })
+        .collect();
+    // Propagate treatments back onto external systems.
+    for system in &mut manifest.external_systems {
+        if let Some(summary) = manifest
+            .world
             .dependencies
             .iter()
-            .map(|d| WorldDependencySummary {
-                id: d.id.clone(),
-                treatment: match &d.treatment {
-                    Treatment::RealService { pack, .. } => format!("service-pack:{pack}"),
-                    Treatment::Stub { protocol } => format!("stub:{protocol}"),
-                    Treatment::Fixture { path } => format!("fixture:{path}"),
-                    Treatment::FleetRepository { analysis } => format!("fleet:{analysis}"),
-                    Treatment::Absent => "absent".into(),
-                    Treatment::Unresolved { reason } => format!("unresolved:{reason}"),
-                },
-            })
-            .collect();
-        // Propagate treatments back onto external systems.
-        for system in &mut manifest.external_systems {
-            if let Some(summary) = manifest
-                .world
-                .dependencies
-                .iter()
-                .find(|d| d.id == system.id)
-            {
-                system.treatment = Some(summary.treatment.clone());
-            }
+            .find(|d| d.id == system.id)
+        {
+            system.treatment = Some(summary.treatment.clone());
         }
+    }
+    let note = "world lock is proposed, not verified: replay requires service cells (KVM worker)";
+    if !manifest.completeness.limitations.iter().any(|l| l == note) {
+        manifest.completeness.limitations.push(note.into());
+    }
+    lock
+}
+
+/// Tomography mode: run each workload twice — first in an isolated
+/// network namespace (deny-all egress, loopback intact), then with
+/// network access — and classify external dependencies from the
+/// comparison (spec §20's counterfactual discipline applied to the
+/// network group). One bundle carries both runs, the classification
+/// evidence, and the synthesized world.
+pub fn run_tomography(
+    locator: &str,
+    reference: Option<String>,
+    workload_kinds: &[String],
+    out: &Path,
+    options: &ExecutionOptions,
+    packs_dir: Option<&Path>,
+) -> Result<Bundle> {
+    let mut ctx = Context::open(out, packs_dir)?;
+    let snapshot = acquire_snapshot(locator, reference, out)?;
+    let report = ovid_inventory::scan(&snapshot);
+    record_inventory(&mut ctx, &snapshot, &report)?;
+    let graph = ovid_planner::plan(&snapshot, &ctx.registry);
+
+    let mut manifest = Manifest::new(
+        ctx.ids.next("analysis").to_string(),
+        "tomography",
+        repository_section(&snapshot),
+    );
+    manifest.analysis.backend = Some("ovid-process-backend".into());
+    manifest.analysis.isolation_tier = Some("trusted-process".into());
+    manifest.inventory.languages = report.languages.clone();
+    manifest.inventory.components = report.components.clone();
+    manifest.inventory.scanned_files = report.scanned_files.clone();
+    manifest.completeness.warnings = report.warnings.clone();
+
+    let isolation = network_isolation_available();
+    if !isolation {
         manifest.completeness.limitations.push(
-            "world lock is proposed, not verified: replay requires service cells (KVM worker)"
+            "network isolation unavailable (no unprivileged user namespaces): offline runs \
+             only strip proxy variables, so direct egress may still succeed"
                 .into(),
         );
-        Some(lock)
-    } else {
-        None
+    }
+    // Without namespace isolation, the best-effort offline posture is a
+    // scrubbed environment with proxy variables removed.
+    let proxy_vars = [
+        "https_proxy",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ];
+    let offline_options = ExecutionOptions {
+        in_place: options.in_place,
+        inherit_env: if isolation {
+            options.inherit_env.clone()
+        } else {
+            options
+                .inherit_env
+                .iter()
+                .filter(|v| !proxy_vars.contains(&v.as_str()))
+                .cloned()
+                .collect()
+        },
+        timeout_seconds: options.timeout_seconds,
+        counterfactual_env: vec![],
     };
+    let offline_network = if isolation {
+        NetworkMode::Isolated
+    } else {
+        NetworkMode::Inherit
+    };
+
+    let mut last_online: Option<(WorkloadExecution, Vec<String>)> = None;
+    for kind_name in workload_kinds {
+        let kind = match kind_name.as_str() {
+            "build" => ActionKind::Build,
+            "test" => ActionKind::Test,
+            "install" => ActionKind::DependencyInstall,
+            "start" => ActionKind::Start,
+            other => bail!("unknown workload kind {other:?} (use build|test|install|start)"),
+        };
+        let candidates = graph.candidates(kind);
+        let Some(action) = candidates.first() else {
+            manifest
+                .completeness
+                .limitations
+                .push(format!("no {kind_name} candidate command was discovered"));
+            continue;
+        };
+        manifest.build.commands.push(action.command.clone());
+        ctx.record(
+            "action-selected",
+            "ovid-planner",
+            action.source.trust_tier(),
+            serde_json::json!({
+                "workload": kind_name,
+                "command": action.command,
+                "source": action.source,
+                "source_file": action.source_file,
+                "score": action.score,
+            }),
+            None,
+        )?;
+        let predicate = SuccessPredicate::ExitCode { expected: 0 };
+
+        // Run 1: network-isolated (the counterfactual condition).
+        let offline_name = format!("{kind_name}-offline");
+        let offline = execute_workload(
+            &mut ctx,
+            &snapshot,
+            &action.command,
+            &offline_options,
+            &offline_name,
+            offline_network,
+        )?;
+        absorb_execution(
+            &mut ctx,
+            &mut manifest,
+            &offline,
+            &offline_name,
+            &action.command,
+            &predicate,
+        )?;
+
+        // Run 2: network available (the baseline condition).
+        let online_name = format!("{kind_name}-online");
+        let online = execute_workload(
+            &mut ctx,
+            &snapshot,
+            &action.command,
+            options,
+            &online_name,
+            NetworkMode::Inherit,
+        )?;
+        absorb_execution(
+            &mut ctx,
+            &mut manifest,
+            &online,
+            &online_name,
+            &action.command,
+            &predicate,
+        )?;
+
+        let offline_passed = offline.result.success();
+        let online_passed = online.result.success();
+
+        // Pair observations across runs by stable identity.
+        let offline_map: BTreeMap<String, &ovid_gateway::ExternalObservation> = offline
+            .network
+            .external
+            .iter()
+            .map(|o| (o.identity(), o))
+            .collect();
+        let online_map: BTreeMap<String, &ovid_gateway::ExternalObservation> = online
+            .network
+            .external
+            .iter()
+            .map(|o| (o.identity(), o))
+            .collect();
+        let identities: std::collections::BTreeSet<String> = offline_map
+            .keys()
+            .chain(online_map.keys())
+            .cloned()
+            .collect();
+
+        // The controlled group: externally-controlled dependencies that
+        // were unavailable offline and available online — what the
+        // intervention actually varied.
+        let controlled_group: Vec<String> = identities
+            .iter()
+            .filter(|identity| {
+                let offline_obs = offline_map.get(*identity).copied();
+                let online_obs = online_map.get(*identity).copied();
+                let controlled = offline_obs
+                    .or(online_obs)
+                    .map(externally_controlled)
+                    .unwrap_or(false);
+                let offline_unavailable = offline_obs.map(|o| o.all_failed()).unwrap_or(true);
+                let online_available = online_obs.map(|o| !o.all_failed()).unwrap_or(false);
+                controlled && offline_unavailable && online_available
+            })
+            .cloned()
+            .collect();
+        if controlled_group.len() > 1 && !offline_passed && online_passed {
+            manifest.completeness.limitations.push(format!(
+                "network counterfactual for {kind_name} is group-level: {} dependencies \
+                 changed availability together ({}); per-dependency causality needs \
+                 individual variation",
+                controlled_group.len(),
+                controlled_group.join(", ")
+            ));
+        }
+
+        for identity in &identities {
+            let pair = NetworkCounterfactual {
+                offline: offline_map.get(identity).copied(),
+                online: online_map.get(identity).copied(),
+            };
+            let verdict = classify_network_counterfactual(
+                &pair,
+                offline_passed,
+                online_passed,
+                controlled_group.len(),
+            );
+            let evidence_id = ctx.record(
+                "experiment-outcome",
+                "ovid-experiment",
+                TrustTier::T0,
+                serde_json::json!({
+                    "condition": "network-isolated",
+                    "workload": kind_name,
+                    "dependency": identity,
+                    "offline_passed": offline_passed,
+                    "online_passed": online_passed,
+                    "classification": verdict.classification,
+                    "group_level": verdict.group_level,
+                    "isolation": if isolation { "user-netns" } else { "proxy-env-strip" },
+                }),
+                Some(offline.run_id.clone()),
+            )?;
+            match verdict.classification {
+                CausalClassification::Required => {
+                    ctx.claim(
+                        "requires",
+                        format!("workload:{kind_name}"),
+                        format!("service:{identity}"),
+                        ClaimStates::default()
+                            .with(ClaimState::Attempted)
+                            .with(ClaimState::CausallyRequired),
+                        vec![evidence_id.clone()],
+                    );
+                }
+                CausalClassification::Optional => {
+                    ctx.claim(
+                        "optionally-uses",
+                        format!("workload:{kind_name}"),
+                        format!("service:{identity}"),
+                        ClaimStates::default().with(ClaimState::Attempted),
+                        vec![evidence_id.clone()],
+                    );
+                }
+                _ => {}
+            }
+            // Override the per-run causality with the counterfactual
+            // verdict on the matching manifest record.
+            for system in &mut manifest.external_systems {
+                let system_identity = format!(
+                    "{}:{}",
+                    system.dns_name.as_deref().unwrap_or(&system.address),
+                    system.port
+                );
+                if &system_identity == identity {
+                    system.causality = Some(verdict.classification);
+                    system.evidence.push(evidence_id.to_string());
+                }
+            }
+        }
+
+        last_online = Some((online, action.command.clone()));
+    }
+
+    let lock = last_online.as_ref().map(|(execution, argv)| {
+        synthesize_world(
+            &ctx,
+            &mut manifest,
+            &execution.proposals,
+            &snapshot.canonical_url,
+            argv,
+        )
+    });
 
     manifest
         .completeness

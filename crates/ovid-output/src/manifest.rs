@@ -154,6 +154,15 @@ pub struct ExternalSystemReport {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_name: Option<String>,
+    /// All distinct addresses observed for this dependency (a named CDN
+    /// dependency typically has several).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<String>,
+    /// How the dependency is identified: `dns-name` (name observed) or
+    /// `ip-only` (no DNS observation was available — absence of a name is
+    /// explicitly unknown, not "nameless", §25.3).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub identity: String,
     pub attempts: u64,
     pub failures: u64,
     #[serde(default)]

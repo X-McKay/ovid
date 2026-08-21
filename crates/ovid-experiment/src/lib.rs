@@ -18,10 +18,14 @@
 //! by the CLI.
 
 pub mod counterfactual;
+pub mod network;
 pub mod predicate;
 pub mod resolution;
 
 pub use counterfactual::{ExperimentBudget, ExperimentRecord, MvwSolver, SolverOutcome};
+pub use network::{
+    classify_network_counterfactual, externally_controlled, NetworkCounterfactual, NetworkVerdict,
+};
 pub use predicate::SuccessPredicate;
 pub use resolution::{propose_resolutions, ResolutionKind, ResolutionProposal};
 

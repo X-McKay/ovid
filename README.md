@@ -42,6 +42,20 @@ is required or optional. Ovid closes that gap with a hybrid model:
   resolutions for missing tools (via tool-resolver packs) and refused
   services (via service packs); synthesize a proposed world lock and
   Compose replay file; run environment-variable counterfactuals.
+- `ovid tomography` — the full loop in one command: discover workloads,
+  run each **twice** (first in an isolated network namespace with
+  deny-all egress and loopback intact, then with network access), and
+  classify every external dependency from the counterfactual pair
+  (`required` only when a single controlled dependency flips the
+  outcome; group-level changes stay honestly `unresolved`). One bundle
+  carries both runs, the experiment evidence, and the world lock.
+- **DNS identity capture** — resolver traffic (port 53) is decoded from
+  observed syscalls into DNS query/answer evidence, so external
+  dependencies are identified by *hostname* (grouping CDN address
+  rotation into one logical dependency), resolver bypass (queries sent
+  to servers not in `/etc/resolv.conf`, e.g. hardcoded `8.8.8.8`) is
+  flagged, and destinations with no observed resolution are explicitly
+  marked `ip-only` rather than silently nameless.
 - `ovid explain` — traverse any claim to its supporting evidence.
 - `ovid diff` — compare two analyses (components, versions, external
   systems, listeners, tools).
@@ -119,6 +133,9 @@ ovid observe . --run 'cargo test' --inherit-env PATH --inherit-env HOME
 
 # Full local analysis: discover workloads, observe, synthesize a world
 ovid analyze . --workloads build,test --inherit-env PATH --inherit-env HOME
+
+# Offline/online counterfactual pair with one bundle (network causality)
+ovid tomography . --workloads test --inherit-env PATH --inherit-env HOME
 
 # Why do you believe this?
 ovid explain claim:01J... --from ovid-output

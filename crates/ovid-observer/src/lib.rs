@@ -16,6 +16,7 @@
 //!   opens, always preserve first occurrences and every failure.
 
 pub mod aggregate;
+pub mod dns;
 pub mod strace;
 
 pub use aggregate::{aggregate, AggregatedEvents};

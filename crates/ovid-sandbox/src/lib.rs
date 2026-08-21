@@ -22,7 +22,7 @@ pub mod firecracker;
 pub mod process;
 
 pub use firecracker::{FirecrackerBackend, VmSpec};
-pub use process::ProcessBackend;
+pub use process::{network_isolation_available, ProcessBackend};
 
 use ovid_core::OvidError;
 use ovid_observer::ObservationReport;
@@ -65,6 +65,24 @@ impl Default for ResourceLimits {
     }
 }
 
+/// Network posture for a run (FR-041's deny-default, process-backend
+/// edition).
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkMode {
+    /// The run shares the host network namespace. External reachability is
+    /// whatever the host (and any proxy variables passed via
+    /// `inherit_env`) provides.
+    #[default]
+    Inherit,
+    /// The run executes in a fresh user+network namespace: loopback only,
+    /// no external routes. This is a real deny-all for counterfactual
+    /// experiments (§20). Requires unprivileged user namespaces
+    /// (`unshare -r -n`); availability is probed with
+    /// [`process::network_isolation_available`].
+    Isolated,
+}
+
 /// How the workspace is materialized.
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case", tag = "mode")]
@@ -90,6 +108,8 @@ pub struct RunSpec {
     pub limits: ResourceLimits,
     /// Observe boundaries with the configured observer.
     pub observe: bool,
+    /// Network posture (default: inherit the host namespace).
+    pub network: NetworkMode,
 }
 
 impl RunSpec {
@@ -101,6 +121,7 @@ impl RunSpec {
             inherit_env: Vec::new(),
             limits: ResourceLimits::default(),
             observe: true,
+            network: NetworkMode::Inherit,
         }
     }
 }
