@@ -115,25 +115,46 @@ Key decisions (full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)):
 
 ## Getting started
 
-### Prerequisites
+### Install
 
-- Rust 1.85+ (`rustup` recommended). Linux for full native execution;
-  the workspace also compiles on macOS and Windows (static analysis
-  everywhere; native execution needs a unix host, and guest-VM
-  execution needs the microsandbox CLI below)
-- `strace` for boundary observation (`apt-get install strace`)
+One-liner (downloads the latest prebuilt release for your platform,
+sha256-verified; falls back to building from source with cargo):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/X-McKay/ovid/main/scripts/install.sh | sh
+```
+
+Alternatives:
+
+```sh
+# Build-from-git one-liner (needs Rust 1.85+; installs to ~/.cargo/bin)
+cargo install --locked --git https://github.com/X-McKay/ovid ovid-cli
+
+# From a checkout
+cargo install --locked --path crates/ovid-cli
+```
+
+The installer honors `OVID_INSTALL_DIR` (default `~/.local/bin`) and
+`OVID_VERSION` (a release tag; default latest). On a private fork,
+clone first and run `scripts/install.sh` from the checkout with
+`OVID_REPO_URL` pointing at your remote.
+
+### Runtime prerequisites
+
+- Linux for full native execution (`strace` for observation:
+  `apt-get install strace`; unprivileged user namespaces for offline
+  counterfactual legs). The workspace also compiles on macOS and
+  Windows — static analysis works everywhere; on those hosts use the
+  microsandbox backend for execution
 - `git` for URL-based acquisition
 - Optional: `/dev/kvm` + Firecracker for the MicroVM backend
 - Optional: the `msb` CLI (<https://microsandbox.dev>) for
   `--backend microsandbox` — libkrun guest VMs on Linux/KVM,
   macOS/Apple Silicon, or Windows/WHP
 
-### Build and run
+### Run
 
 ```sh
-cargo build --release
-alias ovid=target/release/ovid
-
 # Static inventory of a repository
 ovid inventory https://github.com/sharkdp/fd --ref master
 

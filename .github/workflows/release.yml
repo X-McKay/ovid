@@ -1,0 +1,70 @@
+# Release binaries: build the ovid CLI for each supported platform on a
+# version tag (v*) and attach sha256-verified archives to the GitHub
+# release. `scripts/install.sh` downloads these; when absent it falls
+# back to `cargo install --git`.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release -p ovid-cli --target ${{ matrix.target }}
+      - name: Package (tar.gz + sha256)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          staging=ovid-${{ matrix.target }}
+          mkdir "$staging"
+          cp target/${{ matrix.target }}/release/ovid "$staging/"
+          cp README.md "$staging/" 2>/dev/null || true
+          cp LICENSE* "$staging/" 2>/dev/null || true
+          tar -czf "$staging.tar.gz" -C "$staging" .
+          (sha256sum "$staging.tar.gz" || shasum -a 256 "$staging.tar.gz") > "$staging.tar.gz.sha256"
+      - name: Package (zip + sha256)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          staging=ovid-${{ matrix.target }}
+          mkdir "$staging"
+          cp target/${{ matrix.target }}/release/ovid.exe "$staging/"
+          cp README.md "$staging/" 2>/dev/null || true
+          7z a "$staging.zip" "./$staging/*"
+          sha256sum "$staging.zip" > "$staging.zip.sha256"
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ovid-${{ matrix.target }}.tar.gz
+            ovid-${{ matrix.target }}.tar.gz.sha256
+            ovid-${{ matrix.target }}.zip
+            ovid-${{ matrix.target }}.zip.sha256
