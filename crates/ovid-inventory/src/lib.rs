@@ -6,17 +6,16 @@
 //! results feed the `declared`/`resolved` claim-state dimensions only —
 //! never `loaded` or `exercised` (§6.3).
 //!
-//! Per FR-070 the long-term posture is to *integrate* external SBOM tools
-//! (Syft, cdxgen) as sandboxed providers rather than reimplement every
-//! ecosystem. The native scanners here cover the major lockfile formats so
-//! Ovid produces useful inventory with zero external dependencies; the
-//! [`provider`] module defines the contract external SBOM providers plug
-//! into.
+//! Per FR-070 (and proposal §18 phase 6) the long-term posture is to
+//! *integrate* external SBOM tools (Syft, cdxgen) as sandboxed provider
+//! adapters rather than reimplement every ecosystem. The native scanners
+//! here cover the major lockfile formats so Ovid produces useful
+//! inventory with zero external dependencies; the provider adapters
+//! arrive with that phase.
 
 pub mod compose;
 pub mod endpoints;
 pub mod languages;
-pub mod provider;
 pub mod purl;
 pub mod scanners;
 

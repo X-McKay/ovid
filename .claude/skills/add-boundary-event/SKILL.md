@@ -30,10 +30,11 @@ this list end to end — a half-wired event kind is worse than none.
    transition (never collapse)? Add to `signature()` and test.
 4. **Consumers** — wire where the event carries meaning:
    - `ovid-gateway/src/analysis.rs` for network-shaped events;
-   - `ovid-experiment/src/resolution.rs` if the event seeds proposals;
-   - `ovid-cli/src/pipeline.rs` (`absorb_execution`) if it feeds a
-     manifest section or claim (append ledger evidence first, then
-     claims referencing the ids).
+   - `ovid-cli/src/lab.rs` (`observations` / `executable_candidates`)
+     if the event contributes prove-loop candidates (proposal §10.4);
+   - `ovid-cli/src/inspect_cmd.rs` if it feeds a manifest section or
+     claim (append ledger evidence first, then claims referencing the
+     ids).
 5. **Trust tier:** guest-observer events are T2; host-enforced facts
    (exit codes, gateway decisions) are T0. Don't inflate.
 6. **Tests:** unit tests at each touched layer, plus an integration test

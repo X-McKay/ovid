@@ -3,10 +3,10 @@
 # docs/VALIDATION.md).
 #
 # Clones pinned refs of real repositories of varying complexity, runs
-# `ovid inventory` (all) and an observed workload (where cheap), measures
-# wall time, and computes inventory accuracy against independent ground
-# truth (cargo metadata, package manifests). Results are written to
-# validation-workdir/results.md.
+# `ovid inspect` (all) and `ovid prove` on explicit workloads (where
+# cheap), measures wall time, and computes inventory accuracy against
+# independent ground truth (cargo metadata, package manifests). Results
+# are written to validation-workdir/results.md.
 #
 # Network note: acquisition and ground-truth commands run on the host and
 # use whatever proxy configuration the host has. Observed workloads run in
@@ -59,7 +59,7 @@ echo "" >> "$RESULTS"
 echo "Host: $(nproc) CPUs, $(free -m | awk '/^Mem:/{print $2}') MiB RAM, $(uname -r)" >> "$RESULTS"
 echo "Ovid commit: $(git -C "$ROOT" rev-parse --short HEAD)" >> "$RESULTS"
 echo "" >> "$RESULTS"
-echo "| Repo | Rev | Files | Inventory wall (ms) | Components (decl/res) | Accuracy | Notes |" >> "$RESULTS"
+echo "| Repo | Rev | Files | Inspect wall (ms) | Components (decl/res) | Accuracy | Notes |" >> "$RESULTS"
 echo "|---|---|---:|---:|---|---|---|" >> "$RESULTS"
 
 for entry in "${REPOS[@]}"; do
@@ -69,7 +69,7 @@ for entry in "${REPOS[@]}"; do
     rm -rf "$out"
 
     start_ms=$(date +%s%3N)
-    "$OVID" inventory "$url" --ref "$ref" --out "$out" > "$WORK/$name.summary.txt" 2>&1 || {
+    "$OVID" inspect "$url" --ref "$ref" --out "$out" > "$WORK/$name.summary.txt" 2>&1 || {
         echo "| $name | clone-failed | - | - | - | - | acquisition failed |" >> "$RESULTS"
         continue
     }
@@ -77,11 +77,11 @@ for entry in "${REPOS[@]}"; do
     # Re-run on the cached clone to time pure inventory (excluding network
     # transfer, per spec §12.2's measurement rule).
     start2_ms=$(date +%s%3N)
-    "$OVID" inventory "$url" --ref "$ref" --out "$out" > /dev/null 2>&1
+    "$OVID" inspect "$url" --ref "$ref" --out "$out" > /dev/null 2>&1
     end2_ms=$(date +%s%3N)
     inv_ms=$((end2_ms - start2_ms))
     total_ms=$((end_ms - start_ms))
-    log "$name: cold ${total_ms}ms, warm inventory ${inv_ms}ms"
+    log "$name: cold ${total_ms}ms, warm inspect ${inv_ms}ms"
 
     repo_dir=$(python3 - "$out" <<'PY'
 import json,sys
@@ -102,49 +102,52 @@ cs=m["inventory"]["components"]
 print(f"{sum(1 for c in cs if c['states'].get('declared'))}/{sum(1 for c in cs if c['states'].get('resolved'))} of {len(cs)}")
 PY
 )
-    echo "| $name | $rev | $files | $inv_ms | $decl_res | $accuracy | cold acquire+inventory ${total_ms}ms |" >> "$RESULTS"
+    echo "| $name | $rev | $files | $inv_ms | $decl_res | $accuracy | cold acquire+inspect ${total_ms}ms |" >> "$RESULTS"
 done
 
 # ---------------------------------------------------------------------------
-# Observed workload demonstrations (dynamic boundary evidence on real repos)
+# Proved workloads (the causal loop on real repos). Remote sources on the
+# process backend require the explicit --trusted-process opt-in; these
+# are well-known repositories pinned by ref.
 # ---------------------------------------------------------------------------
 echo "" >> "$RESULTS"
-echo "## Observed workloads" >> "$RESULTS"
+echo "## Proved workloads" >> "$RESULTS"
 echo "" >> "$RESULTS"
 
-observe_case() {
-    local name="$1" locator="$2" ref="$3" cmd="$4" timeout="$5"
-    local out="$WORK/$name-observe"
+prove_case() {
+    local name="$1" locator="$2" ref="$3" timeout="$4"; shift 4
+    local out="$WORK/$name-prove"
     rm -rf "$out"
-    log "observe $name: $cmd"
+    log "prove $name: $*"
     local start_ms end_ms
     start_ms=$(date +%s%3N)
-    if "$OVID" observe "$locator" --ref "$ref" --run "$cmd" --timeout "$timeout" \
-        "${INHERIT_ARGS[@]}" --out "$out" > "$WORK/$name-observe.summary.txt" 2>&1; then
-        end_ms=$(date +%s%3N)
-        python3 - "$out" "$name" "$cmd" "$((end_ms - start_ms))" <<'PY' >> "$RESULTS"
+    if "$OVID" prove "$locator" --ref "$ref" --trusted-process --timeout "$timeout" \
+        "${INHERIT_ARGS[@]}" --out "$out" -- "$@" \
+        > "$WORK/$name-prove.summary.txt" 2>&1; then :; fi
+    end_ms=$(date +%s%3N)
+    if [ -f "$out/proof.json" ]; then
+        python3 - "$out" "$name" "$*" "$((end_ms - start_ms))" <<'PY' >> "$RESULTS"
 import json,sys
-m=json.load(open(sys.argv[1]+"/ovid.json"))
-w=m["workloads"][0]
-c=m["completeness"]
-ext=len(m["external_systems"]); unres=len(m["unresolved"]); tools=len(m["build"]["tools"])
-print(f"- **{sys.argv[2]}** — `{sys.argv[3]}` — {w['status']} in {w['duration_ms']} ms "
-      f"(pipeline total {sys.argv[4]} ms); events {c['events_captured']} captured / "
-      f"{c['events_collapsed']} collapsed / {c['noise_dropped']} noise; "
-      f"{ext} external system(s), {tools} missing tool(s), {unres} unresolved")
+p=json.load(open(sys.argv[1]+"/proof.json"))
+verdict=p["baseline"]["verdict"]
+world=p["world"]["status"]
+by={"required":0,"optional":0,"unresolved":0}
+for c in p["conclusions"]:
+    by[c["conclusion"]["necessity"]] += 1
+print(f"- **{sys.argv[2]}** — `{sys.argv[3]}` — baseline {verdict}, world {world} "
+      f"(pipeline total {sys.argv[4]} ms, {p['trials_executed']} trials); "
+      f"{by['required']} required / {by['optional']} optional / {by['unresolved']} unresolved")
 PY
     else
-        echo "- **$name** — \`$cmd\` — pipeline failed (see $name-observe.summary.txt)" >> "$RESULTS"
+        echo "- **$name** — pipeline failed (see $name-prove.summary.txt)" >> "$RESULTS"
     fi
 }
 
 # Python import via stdlib only (fails fast if flask cannot import: that
 # failure evidence is the point).
-observe_case "flask" "https://github.com/pallets/flask" "main" "python3 -c 'import flask' || true" 120
+prove_case "flask" "https://github.com/pallets/flask" "main" 300 sh -c "python3 -c 'import flask' || true"
 # Rust: metadata + lockfile verification exercises heavy file boundaries.
-observe_case "fd" "https://github.com/sharkdp/fd" "master" "cargo metadata --format-version 1 --no-deps > /dev/null" 300
-# Rust: full debug build of a small crate under observation (network via proxy).
-observe_case "fd-build" "https://github.com/sharkdp/fd" "master" "cargo build -q" 1800
+prove_case "fd" "https://github.com/sharkdp/fd" "master" 600 sh -c "cargo metadata --format-version 1 --no-deps > /dev/null"
 
 echo "" >> "$RESULTS"
 echo "Generated $(date -u +%FT%TZ)" >> "$RESULTS"

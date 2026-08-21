@@ -25,9 +25,7 @@ pub enum Treatment {
     Stub { protocol: String },
     /// Static fixture (file, seed data).
     Fixture { path: String },
-    /// Another repository's verified world (fleet mode).
-    FleetRepository { analysis: String },
-    /// Deliberately absent — e.g. counterfactually removed, or optional.
+    /// Deliberately absent — proven optional in scope.
     Absent,
     /// Could not be satisfied; preserved, not hidden (FR-048).
     Unresolved { reason: String },
@@ -73,30 +71,6 @@ impl World {
         canonical.tools.sort();
         let json = serde_json::to_vec(&canonical).expect("worlds serialize");
         Digest::of_bytes(&json)
-    }
-
-    /// Derive a new world with one dependency's treatment replaced — the
-    /// "exactly one controlled change" rule of §14.9.
-    pub fn with_treatment(&self, dependency_id: &str, treatment: Treatment) -> World {
-        let mut derived = self.clone();
-        for dependency in &mut derived.dependencies {
-            if dependency.id == dependency_id {
-                dependency.treatment = treatment;
-                return derived;
-            }
-        }
-        derived.dependencies.push(WorldDependency {
-            id: dependency_id.to_string(),
-            treatment,
-            aliases: vec![dependency_id.to_string()],
-            port: None,
-            environment: BTreeMap::new(),
-        });
-        derived
-    }
-
-    pub fn dependency(&self, id: &str) -> Option<&WorldDependency> {
-        self.dependencies.iter().find(|d| d.id == id)
     }
 }
 
@@ -154,7 +128,7 @@ pub struct WorldNetwork {
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct WorldCell {
     pub id: String,
-    /// `target`, `service`, `stub`, or `repository`.
+    /// `target`, `service`, `stub`, or `unresolved`.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -218,18 +192,6 @@ impl WorldLock {
                     for alias in &dependency.aliases {
                         dns.insert(alias.clone(), address.clone());
                     }
-                    address_host += 1;
-                }
-                Treatment::FleetRepository { analysis } => {
-                    cells.push(WorldCell {
-                        id: dependency.id.clone(),
-                        kind: "repository".into(),
-                        image: None,
-                        provider_pack: Some(analysis.clone()),
-                        environment: dependency.environment.clone(),
-                        port: dependency.port,
-                    });
-                    startup.push(dependency.id.clone());
                     address_host += 1;
                 }
                 Treatment::Unresolved { .. } => {
@@ -372,24 +334,10 @@ mod tests {
         let mut b = a.clone();
         b.dependencies.reverse();
         assert_eq!(a.digest(), b.digest());
-        let c = a.with_treatment("cache", Treatment::Absent);
+        let mut c = a.clone();
+        c.dependencies[1].treatment = Treatment::Absent;
+        c.dependencies.reverse();
         assert_ne!(a.digest(), c.digest());
-    }
-
-    #[test]
-    fn with_treatment_changes_exactly_one_dependency() {
-        let world = world_with_postgres();
-        let derived = world.with_treatment("orders-db", Treatment::Absent);
-        assert_eq!(derived.dependencies.len(), 1);
-        assert_eq!(
-            derived.dependency("orders-db").unwrap().treatment,
-            Treatment::Absent
-        );
-        // Original untouched.
-        assert!(matches!(
-            world.dependency("orders-db").unwrap().treatment,
-            Treatment::RealService { .. }
-        ));
     }
 
     #[test]

@@ -37,18 +37,6 @@ impl ExecutionBackend for ProcessBackend {
     }
 }
 
-/// Stub for [`crate::firecracker::FirecrackerBackend`].
-pub struct FirecrackerBackend;
-
-impl FirecrackerBackend {
-    pub fn new() -> Result<Self, OvidError> {
-        Err(unsupported("the Firecracker MicroVM backend"))
-    }
-}
-
-/// Stub for the Firecracker VM specification.
-pub struct VmSpec;
-
 /// Unprivileged user+network namespaces are a Linux facility.
 pub fn network_isolation_available() -> bool {
     false

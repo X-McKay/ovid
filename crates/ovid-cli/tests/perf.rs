@@ -37,14 +37,14 @@ fn synthetic_repo(files: usize) -> PathBuf {
 
 #[test]
 #[ignore = "perf guardrail; run with --ignored"]
-fn inventory_5000_files_under_threshold() {
+fn inspect_5000_files_under_threshold() {
     let repo = synthetic_repo(5000);
     let out = std::env::temp_dir().join(format!("ovid-perf-out-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     let start = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_ovid"))
         .args([
-            "inventory",
+            "inspect",
             repo.to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
@@ -53,18 +53,18 @@ fn inventory_5000_files_under_threshold() {
         .unwrap();
     let elapsed = start.elapsed();
     assert!(output.status.success());
-    println!("PERF inventory 5000 files: {} ms", elapsed.as_millis());
+    println!("PERF inspect 5000 files: {} ms", elapsed.as_millis());
     // Spec target: p50 < 30 s for <100k files (§12.2). Guardrail here:
     // 5k files in < 20 s even on slow CI.
     assert!(
         elapsed < Duration::from_secs(20),
-        "inventory too slow: {elapsed:?}"
+        "inspect too slow: {elapsed:?}"
     );
 }
 
 #[test]
 #[ignore = "perf guardrail; run with --ignored"]
-fn observed_run_overhead_is_bounded() {
+fn proved_run_overhead_is_bounded() {
     let repo = synthetic_repo(10);
     let out_base = std::env::temp_dir().join(format!("ovid-perf-ovh-{}", std::process::id()));
     // A workload with real file I/O so the ptrace overhead is amortized.
@@ -82,19 +82,33 @@ fn observed_run_overhead_is_bounded() {
             assert!(status.success());
             return start.elapsed();
         }
+        // One observed baseline trial, no confirmation, no replay: the
+        // closest prove-loop analogue of a single supervised run.
         let output = Command::new(env!("CARGO_BIN_EXE_ovid"))
             .args([
-                "observe",
+                "prove",
                 repo.to_str().unwrap(),
-                "--run",
-                workload,
-                "--in-place",
+                "--workload",
+                "loop",
+                "--baseline-runs",
+                "1",
+                "--max-trials",
+                "1",
+                "--no-replay",
                 "--out",
                 &format!("{}-observed", out_base.display()),
+                "--",
+                "sh",
+                "-c",
+                workload,
             ])
             .output()
             .unwrap();
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         start.elapsed()
     };
     let native = run(false);

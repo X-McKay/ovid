@@ -1,8 +1,14 @@
 # Open-source validation: performance and accuracy
 
+> **Note:** these measurements were taken on the pre-0.2 CLI
+> (`inventory`/`observe`). The static path and observation machinery
+> they measure are unchanged, but the commands are now `ovid inspect`
+> and `ovid prove`; `scripts/validate-oss.sh` has been updated to the
+> 0.2 surface — rerun it to refresh this document.
+
 Ovid was validated against six real open-source repositories of varying
 size, ecosystem, and complexity. Every number below was produced by
-`scripts/validate-oss.sh` (inventory + accuracy + observed workloads) and
+`scripts/validate-oss.sh` (inspect + accuracy + proved workloads) and
 `cargo test -p ovid-cli --test perf -- --ignored --nocapture` (perf
 guardrails); rerun them to reproduce.
 

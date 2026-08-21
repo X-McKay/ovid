@@ -12,7 +12,7 @@ reproducible: every number in that file comes from `scripts/validate-oss.sh`.
 ## Procedure
 
 1. Build release: `cargo build --release -p ovid-cli`.
-2. Run the suite (clones pinned refs, runs inventory + observe, measures
+2. Run the suite (clones pinned refs, runs inspect + prove, measures
    wall time, and computes accuracy against ground truth):
 
    ```sh

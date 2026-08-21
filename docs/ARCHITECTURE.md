@@ -20,13 +20,12 @@ ovid-core        ids, digests, trust tiers (T0–T5), claim states, boundary eve
    │      └── ovid-packs       pack schema + registry (runners/services/protocols/resolvers)
    ├── ovid-planner      command mining -> scored action graph
    ├── ovid-observer     BoundaryObserver contract + strace backend + aggregation
-   ├── ovid-sandbox      ExecutionBackend: process sandbox + Firecracker + microsandbox
-   ├── ovid-gateway      egress/DNS policy, virtual identities, fault policies, network analysis
-   ├── ovid-experiment   success predicates, resolution proposals, MVW solver
+   ├── ovid-sandbox      ExecutionBackend: process sandbox + microsandbox guest VM
+   ├── ovid-gateway      network analysis: DNS identity, external observations, listeners
    ├── ovid-world        worlds, world locks, Compose export
    ├── ovid-output       manifest, CycloneDX/SPDX, integration plan, diff
    ├── ovid-testkit      scripted FixtureLaboratory + RecordingJournal (test doubles)
-   └── ovid-cli          composition root: laboratory/journal adapters + both pipelines
+   └── ovid-cli          composition root: laboratory/journal adapters + command glue
 ```
 
 Layering is strict (no cycles); only the CLI composes all layers.
@@ -99,10 +98,10 @@ Structural rules, enforced in code rather than by convention:
   0.2, and an async runtime would be an adapter concern leaking inward.
   Revisit alongside bounded parallel trials (proposal §10.6).
 
-The legacy commands (`inventory`, `observe`, `analyze`, `tomography`)
-still run the original pipeline while the strangler migration
-(proposal §18) proceeds; `inspect` fronts `inventory`, and `prove`
-supersedes the `analyze`/`tomography` split on the new path.
+The strangler migration (proposal §18) is complete for the CLI: the
+legacy monolithic pipeline (`inventory`, `observe`, `analyze`,
+`tomography`) has been removed. `inspect` is the static path, `prove`
+is the causal loop, and everything else reads bundles.
 
 ## Evidence flow (ADR-004)
 
@@ -150,14 +149,9 @@ explicitly marked `ip-only` in the manifest — absence of a name is
 reported as unknown, never hidden (§25.3). In MicroVM mode the gateway
 serves DNS and supplies the same identities authoritatively.
 
-Two §14.7 normalizers close the static/dynamic gap without crossing it:
-successful opens under known package install layouts (`site-packages/`,
-`node_modules/`, gem dirs — including `.dist-info` names, since import
-and distribution names can differ) promote matching inventory components
-to `loaded` with a `loads` claim (never `exercised`); and Compose files
-are parsed into *declared* external systems (service, image, container
-ports) that merge with observed destinations only on a name match —
-port-only coincidence stays two records (§6.6).
+Compose files are parsed into *declared* external systems (service,
+image, container ports) that merge with other records only on a name
+match — port-only coincidence stays two records (§6.6).
 
 Declared endpoints extend that dimension beyond Compose: a generic miner
 (`ovid-inventory::endpoints`) extracts service-scheme URL literals from
@@ -171,36 +165,22 @@ never values) and listed as unresolved rather than guessed; host matches
 merge onto observed systems, and scheme default ports come from protocol
 packs, not core code (ADR-005).
 
-## Resolution and causality
+## Candidates and causality
 
-After each run, `ovid-gateway` groups socket events into external-system
-observations and classifies protocols via protocol packs (first-byte
-signatures outrank ports, spec §24.2). `ovid-experiment` turns failures
-into ranked **proposals** (spec §14.8, §18.1):
+After each trial, `ovid-gateway` groups socket events into
+external-system observations and classifies protocols via protocol
+packs (first-byte signatures outrank ports, spec §24.2). The laboratory
+adapter normalizes them into candidates (proposal §10.4): network
+identities with per-destination failure accounting, and
+environment-provided executables — used successfully, or searched and
+demonstrably missing (with PATH-scan honesty: a probe that found its
+tool is never "missing"; missing tools carry tool-resolver install
+hints as remediation, never as evidence).
 
-- missing executables (exec ENOENT or multi-directory PATH-scan misses
-  with no successful exec) -> tool-resolver candidates;
-- refused classified destinations -> service packs, else stubs;
-- unknown protocols -> explicitly unresolved (FR-048).
-
-Causality is strictly counterfactual (spec §20):
-
-- a workload that **succeeded while a dependency was unavailable** is a
-  natural counterfactual -> `optional`;
-- `--counterfactual-env VAR` reruns the workload without a variable from
-  clean state -> `required`/`optional`;
-- the `MvwSolver` (crate `ovid-experiment`) minimizes a passing world by
-  group-then-individual removal with repeat-based nondeterminism policy
-  (§20.4–§20.6); unstable results become `unresolved`, never guessed.
-  In local process mode the solver runs against simulated/world-runner
-  backends; full service-cell minimization requires the MicroVM worker;
-- `ovid tomography` runs each workload as an offline/online pair
-  (isolated namespace vs. network access) and classifies dependencies
-  from the comparison (`ovid-experiment/src/network.rs`): `required`
-  only when exactly one externally-controlled dependency changed
-  availability and flipped the outcome; when several changed together
-  the verdict is group-level and each member stays `unresolved`, with
-  the group named in the limitations (§20.4's coupling rule).
+Causality is strictly counterfactual (spec §20) and lives entirely in
+`ovid-domain::classify` — see "The 0.2 prove loop" above for the
+scheduler (natural counterfactuals, the deny-all screen, and
+per-executable hide trials) and the classification gates.
 
 ## Execution backends
 
@@ -224,26 +204,6 @@ repositories" on any Linux host:
 It is **not** a security boundary; its `IsolationTier::TrustedProcess`
 is recorded in every manifest so isolation claims stay honest.
 
-### Firecracker backend (untrusted repositories, ADR-002)
-
-`ovid-sandbox/src/firecracker.rs` implements the configuration plane:
-
-- jailer command lines (dedicated jail dir, unprivileged UID/GID,
-  netns — FR-021);
-- the five-device layout of spec §13.5: immutable rootfs (root, ro),
-  read-only source image (FR-023), writable overlay, bounded output,
-  optional scratch;
-- ordered Unix-socket REST payloads (§34.5): machine-config,
-  boot-source, drives, vsock, InstanceStart;
-- snapshot requests (pause-then-create, §16.6).
-
-`run()` fails closed with `UnsupportedHost` when `/dev/kvm` or the
-firecracker binary is absent — there is no silent fallback. Running the
-full MicroVM loop requires a provisioned worker: a digest-pinned kernel
-and base rootfs containing the guest agent, plus the jailer installed;
-the payload generators are unit-tested so a worker integration is wiring,
-not design.
-
 ### microsandbox backend (host-independent guest VMs)
 
 `ovid-sandbox/src/microsandbox.rs` drives the `msb` CLI
@@ -255,44 +215,34 @@ counterfactual behave identically regardless of host OS:
   scoped inside it; only explicitly inherited variables reach the guest
   (host PATH/HOME never do — they are host-specific);
 - `NetworkMode::Isolated` maps to `msb run --no-net`, a true
-  default-deny for the guest, so tomography's offline leg needs no user
+  default-deny for the guest, so the egress-denied trials need no user
   namespaces here;
 - observation wraps the command with strace writing into the mounted
   workspace when the guest image ships strace (probed once, lazily);
   otherwise the run is honestly unobserved (`observation: None`);
 - isolation is reported as `IsolationTier::MicrovmGuest` — a real VM
-  boundary kept distinct from Firecracker's `Microvm` tier, and absence
-  of the `msb` CLI fails construction with `UnsupportedHost`
-  (never a silent fallback).
+  boundary — and absence of the `msb` CLI fails construction with
+  `UnsupportedHost` (never a silent fallback).
 
 Select it with `--backend microsandbox --guest-image <image>` on
-`observe`, `analyze`, and `tomography`.
-
-## Gateway
-
-`ovid-gateway` implements the Chameleon Gateway's decision plane
-(spec §13.10, §17): deny-default egress (FR-041), registry-proxy
-allowlists, DNS decisions (world aliases > registry proxy > virtual
-identities in explore mode > NXDOMAIN), unconditional metadata-endpoint
-blocking, stable per-name virtual identity allocation (`10.203.x.200+`),
-and fault policies (refuse/timeout/reset/latency/malformed, FR-049) used
-by counterfactual experiments. Packet-level enforcement belongs to the
-MicroVM worker's netns/nftables data plane; in process mode decisions are
-observational and the manifest's isolation tier says so.
+`prove` and `replay`. A Firecracker MicroVM adapter returns when it can
+execute the complete laboratory contract (proposal §8.3's deferral),
+not as a configuration plane without a runtime.
 
 ## Worlds and outputs
 
-A `World` is content-addressed; `with_treatment()` derives a world with
-exactly one controlled change (§14.9). `WorldLock::from_world` produces
-the replay-oriented lock (§26): cells, DNS map, startup order, workload +
-success predicate, and a `Proposed`/`Verified` status — a lock is only
-`verified` after a clean replay succeeds (ADR-008), which requires
-service cells; local mode emits `proposed` and says so in limitations.
+A `World` is content-addressed. `WorldLock::from_world` produces the
+replay-oriented lock (§26): required tools, cells, DNS map, startup
+order, workload + success predicate, and a
+`Proposed`/`Verified`/`ReplayFailed` status — a lock is only `verified`
+after a clean replay succeeds (ADR-008/ADR-015), and `ovid replay`
+updates the status from the outcome, never the other way.
 
 `ovid-output` renders the manifest (spec §25 shape with mandatory
-completeness section), CycloneDX 1.5 (component state carried in
-properties so declared/resolved/exercised distinctions survive export),
-SPDX 2.3, the integration plan, and evidence-aware diffs.
+completeness section and the read-first summary), CycloneDX 1.5
+(component state carried in properties so state distinctions survive
+export), SPDX 2.3, the integration plan, and evidence-aware diffs — the
+standards exports on demand via `ovid export` (proposal §14.10).
 
 ## Extension points
 
@@ -302,8 +252,8 @@ SPDX 2.3, the integration plan, and evidence-aware diffs.
 | Language/tool/service/protocol support | `packs/*.yaml` | `.claude/skills/add-pack` |
 | New boundary event | core event + observer + consumers | `.claude/skills/add-boundary-event` |
 | Observer backend (eBPF) | implement `BoundaryObserver` | — |
-| Execution backend | implement `ExecutionBackend` | — |
-| External SBOM provider | `ovid-inventory/src/provider.rs` contract | — |
+| Laboratory backend | implement `ExecutionBackend` + wrap in `LaboratoryPort` | — |
+| Treatment class | domain `Treatment` + capability flag + lab enforcement | — |
 
 ## Spec traceability (coarse)
 
@@ -311,13 +261,13 @@ SPDX 2.3, the integration plan, and evidence-aware diffs.
 |---|---|
 | §8, §22, §23 evidence/claim model | `ovid-core`, `ovid-evidence` |
 | §11.1 acquisition FR-001..007 | `ovid-repository` |
-| §11.2 planning FR-010..017 | `ovid-planner` (+ predicates in `ovid-experiment`) |
-| §11.3 isolation FR-020..028 | `ovid-sandbox` (process now; Firecracker config plane; full VM loop needs KVM worker) |
-| §11.4 observation FR-030..039 | `ovid-observer` (+gateway corroboration pending MicroVM data plane) |
-| §11.5 gateway FR-040..049 | `ovid-gateway` decision plane |
-| §11.6 causality FR-050..054 | `ovid-experiment` |
+| §11.2 planning FR-010..017 | `ovid-planner` |
+| §11.3 isolation FR-020..028 | `ovid-sandbox` (process + microsandbox guest VM) |
+| §11.4 observation FR-030..039 | `ovid-observer` |
+| §11.5 network analysis FR-040..049 | `ovid-gateway` |
+| §11.6 causality FR-050..054 | `ovid-domain` classifier + `ovid-application` scheduler |
 | §11.8 SBOM FR-070..075 | `ovid-inventory`, `ovid-output` |
-| §11.10 worlds FR-090..095 | `ovid-world`, pipeline synthesis (replay verification pending service cells) |
+| §11.10 worlds FR-090..095 | `ovid-world` + domain type-states; replay verification via `ovid replay` |
 | §11.11/§29 remediation | `ovid diff` (composition scope); full validate pipeline is fleet-phase work |
 | §11.12 explainability FR-110..113 | claims + `ovid explain` + completeness sections |
 | §15 packs | `ovid-packs` + `packs/` |

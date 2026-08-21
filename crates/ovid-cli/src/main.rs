@@ -1,18 +1,16 @@
-//! Ovid CLI.
+//! Ovid CLI — the composition root (proposal §4, §6.1).
 //!
-//! The 0.2 surface (proposal §4) is task-oriented: `inspect` (static,
-//! fast), `prove` (the primary causal loop), `replay` (re-verify a
-//! world), `explain`, `diff`, and `doctor`. The 0.1 commands
-//! (`inventory`, `observe`, `analyze`, `tomography`, `world`, `packs`)
-//! remain available while the strangler migration completes
-//! (proposal §18); `inventory` is an alias-level equivalent of
-//! `inspect`.
+//! The surface is task-oriented: `doctor` (host capabilities), `inspect`
+//! (static, fast, never executes repository code), `prove` (the primary
+//! causal loop), `replay` (re-verify a world), `explain` (evidence
+//! trees), `diff` (compare causal models), `export` (lazy standards
+//! projections), and `packs` (extension management).
 
+mod inspect_cmd;
 mod lab;
-mod pipeline;
 mod prove_cmd;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -122,134 +120,6 @@ enum Command {
     /// Report host capabilities (observation, isolation, backends) with
     /// exact remediation steps.
     Doctor,
-    /// Non-executing static inventory (legacy name; prefer `inspect`).
-    Inventory {
-        /// Repository locator: local path or git URL.
-        locator: String,
-        /// Git reference (branch/tag) for URL locators.
-        #[arg(long = "ref")]
-        reference: Option<String>,
-        /// Output bundle directory.
-        #[arg(long, default_value = "ovid-output")]
-        out: PathBuf,
-        /// Additional pack directory to load (validated, schema-checked).
-        #[arg(long = "packs-dir")]
-        packs_dir: Option<PathBuf>,
-        /// Print the manifest as JSON instead of a summary.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Run one explicit command under boundary observation (mode `observe`).
-    Observe {
-        locator: String,
-        #[arg(long = "ref")]
-        reference: Option<String>,
-        /// The command to run, as one shell string.
-        #[arg(long)]
-        run: String,
-        #[arg(long, default_value = "ovid-output")]
-        out: PathBuf,
-        /// Run in the checkout instead of an ephemeral copy (faster for
-        /// large trees; the tree may be modified).
-        #[arg(long)]
-        in_place: bool,
-        /// Host environment variables to pass through (repeatable).
-        #[arg(long = "inherit-env")]
-        inherit_env: Vec<String>,
-        /// Wall-clock timeout in seconds.
-        #[arg(long, default_value_t = 600)]
-        timeout: u64,
-        /// Execution backend: `process` (supervised host process) or
-        /// `microsandbox` (libkrun guest VM via the `msb` CLI; observation
-        /// and network counterfactuals run inside an always-Linux guest).
-        #[arg(long, default_value = "process")]
-        backend: String,
-        /// Guest image for the microsandbox backend.
-        #[arg(long = "guest-image", default_value = "ubuntu")]
-        guest_image: String,
-        #[arg(long = "packs-dir")]
-        packs_dir: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Discover workloads, execute them under observation, and synthesize a
-    /// proposed world (mode `explore`, local scope).
-    Analyze {
-        locator: String,
-        #[arg(long = "ref")]
-        reference: Option<String>,
-        /// Workload kinds to attempt, in order.
-        #[arg(long, default_value = "build,test")]
-        workloads: String,
-        #[arg(long, default_value = "ovid-output")]
-        out: PathBuf,
-        #[arg(long)]
-        in_place: bool,
-        #[arg(long = "inherit-env")]
-        inherit_env: Vec<String>,
-        #[arg(long, default_value_t = 900)]
-        timeout: u64,
-        /// Counterfactually test whether these environment variables are
-        /// required by re-running without them (repeatable).
-        #[arg(long = "counterfactual-env")]
-        counterfactual_env: Vec<String>,
-        /// Execution backend: `process` (supervised host process) or
-        /// `microsandbox` (libkrun guest VM via the `msb` CLI; observation
-        /// and network counterfactuals run inside an always-Linux guest).
-        #[arg(long, default_value = "process")]
-        backend: String,
-        /// Guest image for the microsandbox backend.
-        #[arg(long = "guest-image", default_value = "ubuntu")]
-        guest_image: String,
-        #[arg(long = "packs-dir")]
-        packs_dir: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Full tomography: discover workloads, run each twice (isolated
-    /// network, then with network), classify external dependencies from
-    /// the counterfactual pair, and emit one complete bundle.
-    Tomography {
-        locator: String,
-        #[arg(long = "ref")]
-        reference: Option<String>,
-        /// Workload kinds to attempt, in order. Provisioning (the best
-        /// discovered install candidate) always runs first, online.
-        #[arg(long, default_value = "build,test")]
-        workloads: String,
-        #[arg(long, default_value = "ovid-output")]
-        out: PathBuf,
-        /// Run in the checkout instead of a persistent workspace copy.
-        #[arg(long)]
-        in_place: bool,
-        /// Extra host environment variables to pass through, on top of the
-        /// defaults (PATH/HOME for all runs; proxy and CA variables for
-        /// online runs). Repeatable.
-        #[arg(long = "inherit-env")]
-        inherit_env: Vec<String>,
-        /// Fully scrub the environment: no default PATH/HOME/proxy
-        /// inheritance.
-        #[arg(long)]
-        no_default_env: bool,
-        /// Run up to this many discovered candidates per workload kind.
-        #[arg(long, default_value_t = 1)]
-        max_candidates: usize,
-        /// Per-run wall-clock timeout in seconds.
-        #[arg(long, default_value_t = 1800)]
-        timeout: u64,
-        /// Execution backend: `process` (supervised host process) or
-        /// `microsandbox` (libkrun guest VM via the `msb` CLI; observation
-        /// and network counterfactuals run inside an always-Linux guest).
-        #[arg(long, default_value = "process")]
-        backend: String,
-        /// Guest image for the microsandbox backend.
-        #[arg(long = "guest-image", default_value = "ubuntu")]
-        guest_image: String,
-        #[arg(long = "packs-dir")]
-        packs_dir: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
     /// Explain a claim by traversing to its evidence (FR-110).
     Explain {
         /// Claim id, e.g. `claim:...`, or a search term.
@@ -258,12 +128,8 @@ enum Command {
         #[arg(long, default_value = "ovid-output")]
         from: PathBuf,
     },
-    /// World operations.
-    World {
-        #[command(subcommand)]
-        command: WorldCommand,
-    },
-    /// Compare two analysis bundles (FR-100/FR-101 composition scope).
+    /// Compare two analysis bundles: components, tools, external
+    /// systems, causal labels, world status.
     Diff {
         /// `ovid.json` (or bundle dir) for the "before" side.
         #[arg(long)]
@@ -274,23 +140,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Pack operations.
-    Packs {
-        #[command(subcommand)]
-        command: PacksCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum WorldCommand {
-    /// Export a generated world from an analysis bundle.
+    /// Render a standards projection from a completed bundle on demand.
     Export {
         /// Analysis bundle directory.
         #[arg(long, default_value = "ovid-output")]
         from: PathBuf,
-        /// `compose` or `lock`.
-        #[arg(long, default_value = "compose")]
+        /// `cyclonedx`, `spdx`, `plan`, `lock`, or `compose`.
+        #[arg(long)]
         format: String,
+    },
+    /// Pack operations.
+    Packs {
+        #[command(subcommand)]
+        command: PacksCommand,
     },
 }
 
@@ -315,7 +177,7 @@ fn main() -> Result<()> {
             out,
             packs_dir,
             json,
-        } => prove_cmd::run_inspect(&locator, reference, &out, packs_dir.as_deref(), json),
+        } => inspect_cmd::run_inspect(&locator, reference, &out, packs_dir.as_deref(), json),
         Command::Prove {
             locator,
             reference,
@@ -337,7 +199,7 @@ fn main() -> Result<()> {
             let options = prove_cmd::ProveOptions {
                 workload,
                 argv: if argv.is_empty() { None } else { Some(argv) },
-                backend: pipeline::BackendKind::parse(&backend)?,
+                backend: lab::BackendKind::parse(&backend)?,
                 guest_image,
                 trusted_process,
                 baseline_runs,
@@ -361,7 +223,7 @@ fn main() -> Result<()> {
         } => {
             let code = prove_cmd::run_replay(
                 &bundle,
-                pipeline::BackendKind::parse(&backend)?,
+                lab::BackendKind::parse(&backend)?,
                 &guest_image,
                 &inherit_env,
                 timeout,
@@ -369,152 +231,7 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Command::Doctor => prove_cmd::run_doctor(),
-        Command::Inventory {
-            locator,
-            reference,
-            out,
-            packs_dir,
-            json,
-        } => {
-            let bundle = pipeline::run_inventory(&locator, reference, &out, packs_dir.as_deref())?;
-            if json {
-                println!("{}", bundle.manifest.to_json_pretty());
-            } else {
-                pipeline::print_summary(&bundle);
-            }
-            Ok(())
-        }
-        Command::Observe {
-            locator,
-            reference,
-            run,
-            out,
-            in_place,
-            inherit_env,
-            timeout,
-            backend,
-            guest_image,
-            packs_dir,
-            json,
-        } => {
-            let options = pipeline::ExecutionOptions {
-                in_place,
-                inherit_env,
-                timeout_seconds: timeout,
-                counterfactual_env: vec![],
-                backend: pipeline::BackendKind::parse(&backend)?,
-                guest_image,
-            };
-            let bundle = pipeline::run_observe(
-                &locator,
-                reference,
-                &run,
-                &out,
-                &options,
-                packs_dir.as_deref(),
-            )?;
-            if json {
-                println!("{}", bundle.manifest.to_json_pretty());
-            } else {
-                pipeline::print_summary(&bundle);
-            }
-            Ok(())
-        }
-        Command::Analyze {
-            locator,
-            reference,
-            workloads,
-            out,
-            in_place,
-            inherit_env,
-            timeout,
-            counterfactual_env,
-            backend,
-            guest_image,
-            packs_dir,
-            json,
-        } => {
-            let kinds: Vec<String> = workloads.split(',').map(|s| s.trim().to_string()).collect();
-            let options = pipeline::ExecutionOptions {
-                in_place,
-                inherit_env,
-                timeout_seconds: timeout,
-                counterfactual_env,
-                backend: pipeline::BackendKind::parse(&backend)?,
-                guest_image,
-            };
-            let bundle = pipeline::run_analyze(
-                &locator,
-                reference,
-                &kinds,
-                &out,
-                &options,
-                packs_dir.as_deref(),
-            )?;
-            if json {
-                println!("{}", bundle.manifest.to_json_pretty());
-            } else {
-                pipeline::print_summary(&bundle);
-            }
-            Ok(())
-        }
-        Command::Tomography {
-            locator,
-            reference,
-            workloads,
-            out,
-            in_place,
-            inherit_env,
-            no_default_env,
-            max_candidates,
-            timeout,
-            backend,
-            guest_image,
-            packs_dir,
-            json,
-        } => {
-            let kinds: Vec<String> = workloads.split(',').map(|s| s.trim().to_string()).collect();
-            let options = pipeline::TomographyOptions {
-                in_place,
-                extra_inherit_env: inherit_env,
-                timeout_seconds: timeout,
-                max_candidates,
-                no_default_env,
-                backend: pipeline::BackendKind::parse(&backend)?,
-                guest_image,
-            };
-            let bundle = pipeline::run_tomography(
-                &locator,
-                reference,
-                &kinds,
-                &out,
-                &options,
-                packs_dir.as_deref(),
-            )?;
-            if json {
-                println!("{}", bundle.manifest.to_json_pretty());
-            } else {
-                pipeline::print_summary(&bundle);
-            }
-            Ok(())
-        }
-        Command::Explain { claim, from } => pipeline::explain(&claim, &from),
-        Command::World { command } => match command {
-            WorldCommand::Export { from, format } => {
-                let lock_path = from.join("world.lock.yaml");
-                let text = std::fs::read_to_string(&lock_path)
-                    .with_context(|| format!("no world lock at {}", lock_path.display()))?;
-                match format.as_str() {
-                    "lock" => print!("{text}"),
-                    "compose" => {
-                        let lock: ovid_world::WorldLock = serde_yaml::from_str(&text)?;
-                        print!("{}", lock.to_compose_yaml());
-                    }
-                    other => bail!("unknown world export format {other:?} (use compose|lock)"),
-                }
-                Ok(())
-            }
-        },
+        Command::Explain { claim, from } => inspect_cmd::explain(&claim, &from),
         Command::Diff {
             before,
             after,
@@ -538,6 +255,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Export { from, format } => inspect_cmd::export(&from, &format),
         Command::Packs { command } => match command {
             PacksCommand::List { dir } => {
                 let mut registry = ovid_packs::PackRegistry::builtin()
@@ -566,7 +284,7 @@ fn main() -> Result<()> {
                         println!("OK: {count} pack(s) in {} are valid", dir.display());
                         Ok(())
                     }
-                    Err(e) => bail!("pack validation failed: {e}"),
+                    Err(e) => anyhow::bail!("pack validation failed: {e}"),
                 }
             }
         },

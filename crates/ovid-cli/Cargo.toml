@@ -22,7 +22,6 @@ ovid-planner.workspace = true
 ovid-observer.workspace = true
 ovid-sandbox.workspace = true
 ovid-gateway.workspace = true
-ovid-experiment.workspace = true
 ovid-world.workspace = true
 ovid-output.workspace = true
 clap.workspace = true

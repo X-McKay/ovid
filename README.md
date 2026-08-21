@@ -62,41 +62,29 @@ The 0.2 surface (primary):
   process — use the microsandbox guest VM, or opt in explicitly with
   `--trusted-process`.
 
-The evidence machinery beneath (also exposed via the legacy commands):
+Supporting commands and machinery:
 
-- `ovid inventory` — non-executing static inventory with language stats,
-  merged declared+resolved components, PURL normalization.
-- `ovid observe` — run one explicit command in a supervised sandbox
-  (scrubbed environment, ephemeral copy-on-write workspace, resource
-  limits, deadlines) under strace-based boundary observation.
-- `ovid analyze` — discover build/test commands from CI files, package
-  scripts, Makefiles, Dockerfiles, and docs; execute them; propose
-  resolutions for missing tools (via tool-resolver packs) and refused
-  services (via service packs); synthesize a proposed world lock and
-  Compose replay file; run environment-variable counterfactuals.
-- `ovid tomography` — the full loop in one command: discover workloads,
-  run each **twice** (first in an isolated network namespace with
-  deny-all egress and loopback intact, then with network access), and
-  classify every external dependency from the counterfactual pair
-  (`required` only when a single controlled dependency flips the
-  outcome; group-level changes stay honestly `unresolved`). One bundle
-  carries both runs, the experiment evidence, and the world lock.
+- `ovid explain` — traverse any claim to its supporting evidence.
+- `ovid diff` — compare two analyses: components, tools, external
+  systems, causal labels, world status.
+- `ovid export` — render CycloneDX 1.5, SPDX 2.3, an integration plan,
+  the world lock, or a Compose replay from a completed bundle, on
+  demand (never written eagerly on every run).
+- `ovid packs` — list/validate declarative packs.
+- **Per-dependency treatments** — beyond the deny-all egress screen,
+  `prove` isolates individual executables by hiding exactly one tool
+  from the search path per trial (PATH shadowing), and reuses natural
+  counterfactuals: a dependency that was demonstrably unavailable while
+  the baseline passed is optional without spending a trial.
 - **DNS identity capture** — resolver traffic (port 53) is decoded from
   observed syscalls into DNS query/answer evidence, so external
   dependencies are identified by *hostname* (grouping CDN address
-  rotation into one logical dependency), resolver bypass (queries sent
-  to servers not in `/etc/resolv.conf`, e.g. hardcoded `8.8.8.8`) is
-  flagged, and destinations with no observed resolution are explicitly
-  marked `ip-only` rather than silently nameless.
-- `ovid explain` — traverse any claim to its supporting evidence.
-- `ovid diff` — compare two analyses (components, versions, external
-  systems, listeners, tools).
-- `ovid world export` — emit the world lock or a Compose replay.
-- `ovid packs` — list/validate declarative packs.
+  rotation into one logical dependency), resolver bypass is flagged,
+  and destinations with no observed resolution are explicitly marked
+  `ip-only` rather than silently nameless.
 - **Evidence ledger**: append-only, hash-chained JSONL with tamper
-  detection; the chain head is published in every manifest's provenance.
-- **Exports**: Ovid manifest (YAML/JSON), CycloneDX 1.5, SPDX 2.3,
-  integration plan (Markdown), world lock, Compose.
+  detection; typed journal events; the chain head is published in every
+  manifest's provenance.
 - **Pack extensibility**: runner recipes, service packs, protocol
   classifiers, and tool resolvers as schema-validated YAML — new
   ecosystem support without core code changes.
@@ -105,20 +93,14 @@ The evidence machinery beneath (also exposed via the legacy commands):
 
 ```mermaid
 flowchart LR
-    CLI[ovid CLI] --> RA[Repository acquisition\nfingerprinting]
-    RA --> INV[Inventory scanners]
-    RA --> PL[Planner\naction graph]
-    PL --> SB[Sandbox backends\nprocess / Firecracker]
+    CLI[ovid CLI\ncomposition root] --> APP[Application use cases\nprove / replay / inspect]
+    APP --> DOM[Pure domain\nbaseline gate, classifier,\nworld type-states]
+    APP --> LAB[Laboratory port\ncapabilities + enforcement]
+    LAB --> SB[Backends\nprocess / microsandbox guest VM]
     SB --> OBS[Boundary observer\nstrace backend]
-    OBS --> AGG[Aggregation]
-    AGG --> LED[(Evidence ledger\nhash-chained)]
-    INV --> LED
-    AGG --> GW[Gateway analysis\nprotocol classification]
-    GW --> RES[Resolution proposals\ntools / services / stubs]
-    RES --> WORLD[World synthesis\nlock + compose]
-    LED --> CLAIMS[Claims + confidence]
-    CLAIMS --> OUT[Manifest, CycloneDX, SPDX,\nintegration plan, diffs]
-    WORLD --> OUT
+    OBS --> GW[Network analysis\nDNS identity, candidates]
+    APP --> JRN[(Typed journal\nhash-chained ledger)]
+    JRN --> PROJ[Projections\nproof.json, manifest, claims,\nworld lock, exports]
 ```
 
 Key decisions (full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)):
@@ -129,19 +111,24 @@ Key decisions (full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)):
   `exercised`, `causally_required` are independent dimensions; static
   scanners can never set dynamic states.
 - **Failures are first-class.** An `execve`/stat `ENOENT` or an
-  `ECONNREFUSED` is evidence that seeds the resolution loop.
+  `ECONNREFUSED` is evidence, never noise.
 - **Causality requires counterfactuals.** `required`/`optional` labels
-  come only from rerun comparisons or natural counterfactuals (workload
-  succeeded while a dependency was down); everything else is
-  `unresolved`.
-- **Three execution backends.** A supervised process sandbox (trusted
-  repositories, unix hosts), a Firecracker MicroVM layer (untrusted
-  code; jailer + read-only source device + overlay + vsock + snapshots)
-  that fails closed on hosts without KVM, and a microsandbox (libkrun)
-  guest-VM backend (`--backend microsandbox`) whose guest is always
-  Linux — so observation and network counterfactuals work identically
-  on Linux/KVM, macOS/Apple Silicon, and Windows/WHP hosts. Manifests
-  always record which isolation tier produced the evidence.
+  come only from enforced interventions or natural counterfactuals
+  (workload succeeded while a dependency was demonstrably unavailable);
+  everything else is `unresolved`. Only the domain classifier can mint
+  them, and unenforceable treatments are refused, never weakened.
+- **Every trial forks from one immutable snapshot.** Provision once,
+  freeze, fork per trial, destroy the overlay after persistence.
+- **Verified means replayed.** A world is `verified` only after a clean
+  replay passes; the type system prevents any other promotion.
+- **Two execution backends.** A supervised process laboratory (trusted
+  repositories, unix hosts) and a microsandbox (libkrun) guest-VM
+  laboratory (`--backend microsandbox`) whose guest is always Linux —
+  observation and network counterfactuals work identically on
+  Linux/KVM, macOS/Apple Silicon, and Windows/WHP hosts. Provenance
+  always records which isolation tier produced the evidence. A
+  Firecracker adapter returns when it can execute the complete
+  laboratory contract.
 - **Packs over analyzers.** Ecosystem knowledge is declarative YAML
   evaluated by generic code.
 
@@ -179,7 +166,6 @@ clone first and run `scripts/install.sh` from the checkout with
   Windows — static analysis works everywhere; on those hosts use the
   microsandbox backend for execution
 - `git` for URL-based acquisition
-- Optional: `/dev/kvm` + Firecracker for the MicroVM backend
 - Optional: the `msb` CLI (<https://microsandbox.dev>) for
   `--backend microsandbox` — libkrun guest VMs on Linux/KVM,
   macOS/Apple Silicon, or Windows/WHP
@@ -212,16 +198,13 @@ ovid explain postgres --from .ovid/runs/<id>
 ovid diff --before out-v1/ --after out-v2/
 ```
 
-The legacy commands (`inventory`, `observe`, `analyze`, `tomography`)
-remain available while the 0.2 migration completes; `tomography` is
-still the way to get the full manifest + standards exports in one run.
-
 `ovid prove` writes a lean bundle to `.ovid/runs/<analysis-id>` (and
 records it in `.ovid/latest`):
 
 ```text
 .ovid/runs/<id>/
 ├── proof.json                # scope, baseline, trials, conclusions, world status
+├── ovid.yaml / ovid.json     # the manifest projection (human / machine, same document)
 ├── evidence.jsonl            # hash-chained ledger of typed journal events
 ├── claims.json               # requires / optionally-uses claims with evidence links
 ├── world.lock.yaml           # world lock; status verified only after clean replay
@@ -229,18 +212,10 @@ records it in `.ovid/latest`):
 └── timings.json              # per-stage wall-clock + trial count
 ```
 
-Legacy analyses write the full bundle:
-
-```text
-ovid-output/
-├── ovid.yaml / ovid.json     # the manifest (human / machine, same document)
-├── evidence.jsonl            # immutable hash-chained evidence ledger
-├── claims.json               # normalized claims with evidence links
-├── cyclonedx.json, spdx.json # standards exports
-├── world.lock.yaml           # reproducible world (analyze mode)
-├── compose.yaml              # local replay environment (analyze mode)
-└── integration-plan.md       # human-readable plan
-```
+`ovid inspect` writes the same manifest/ledger/claims shape (mode
+`inspect`, static facts only) to `--out` (default `ovid-output/`).
+CycloneDX, SPDX, and the integration plan render from any bundle via
+`ovid export --format …` — on demand, never eagerly.
 
 `ovid.yaml` is written in reading order with section banners: a
 `summary` section (headline, counts, ranked findings) comes first, the
@@ -255,8 +230,9 @@ chain head) closes the manifest.
 The process backend is for repositories you trust: it scrubs the
 environment, isolates writes into an ephemeral workspace, and enforces
 resource limits, but it is **not** a security boundary against hostile
-code. Hostile-repository analysis requires the Firecracker backend on a
-Linux/KVM worker (see `docs/ARCHITECTURE.md#execution-backends`).
+code. Untrusted-repository analysis uses the microsandbox guest-VM
+laboratory (`--backend microsandbox`); remote sources refuse the host
+process without an explicit `--trusted-process` opt-in.
 
 ## Testing
 
@@ -276,13 +252,11 @@ accuracy measurements) is documented in
 | Symptom | Cause / fix |
 |---|---|
 | `strace unavailable: boundary observation was not captured` in limitations | Install strace (`apt-get install strace`). The run still completes; only observation is missing. |
-| `observe` fails with `spawn "cargo": No such file or directory` | The sandbox scrubs `PATH` to system defaults. Pass `--inherit-env PATH` (and usually `--inherit-env HOME` for toolchain caches like `~/.cargo`). |
-| Workload needs network (dependency download) but hangs/fails | The sandbox does not provide a registry proxy in process mode; run the dependency-fetch step yourself first, or use `--in-place` against a pre-fetched checkout. |
+| A workload fails with `spawn "cargo": No such file or directory` | The laboratory scrubs the environment; `PATH`/`HOME` are inherited by default, other variables need `--inherit-env NAME`. Run `ovid doctor` first. |
 | `git clone failed` for a URL | Check the ref (`--ref`), network access, and credentials; Ovid clones with hooks disabled and never runs repo code during acquisition. |
-| `UnsupportedHost: /dev/kvm not present` | You asked for the Firecracker backend on a host without KVM. Use the process backend (default) for trusted repos, or provision a Linux/KVM worker. |
-| `tomography` offline run warns about missing isolation | `unshare -r -n` (unprivileged user namespaces) is unavailable — often disabled via `kernel.unprivileged_userns_clone=0` or distro hardening. The offline run falls back to stripping proxy variables and says so in limitations. |
+| Network candidates stay `unresolved` with a "cannot enforce deny-all egress" limitation | `unshare -r -n` (unprivileged user namespaces) is unavailable — often disabled via distro hardening. Ovid refuses to run weakened experiments; use `--backend microsandbox` or enable user namespaces. |
 | External systems show `identity: ip-only` | No DNS resolution was observed for those destinations (e.g. the address was hardcoded, or resolution happened before observation started). The manifest lists how many, so absence of a name reads as unknown, not nameless. |
-| Analysis is slow on a huge repository | Use `--in-place` to skip the ephemeral copy (trusted checkouts only), and prefer `inventory` mode for fleet-style sweeps. |
+| Analysis is slow on a huge repository | `ovid inspect` is the fast static path; `prove` pays for provisioning + snapshot forks per trial (lower `--max-trials` to bound it). |
 | Golden test failure after your change | Expected if output changed intentionally — regenerate with `UPDATE_GOLDENS=1` and commit the diff; otherwise you introduced a regression. |
 | `pack validation failed` | Packs must have `api_version: ovid.dev/pack/v1` and digest-pinned service images. Run `ovid packs validate <dir>` for the exact error. |
 | Ledger `chain break at record …` | The evidence file was edited or truncated. Evidence is immutable; rerun the analysis. |
@@ -290,7 +264,7 @@ accuracy measurements) is documented in
 ## Repository layout
 
 ```text
-crates/            13-crate workspace (core -> evidence -> ... -> cli)
+crates/            13-crate workspace (core -> domain -> application -> adapters -> cli)
 packs/             built-in declarative packs (runners, services, protocols, resolvers)
 fixtures/          test fixture repositories + golden files
 scripts/           validation and maintenance scripts

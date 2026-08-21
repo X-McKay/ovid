@@ -17,7 +17,7 @@
 //! `--no-net` is a true default-deny for the guest (no egress rules), so
 //! [`NetworkMode::Isolated`] needs no user namespaces here. Isolation is
 //! reported as [`IsolationTier::MicrovmGuest`] — a real VM boundary, kept
-//! distinct from Firecracker's `Microvm` tier so manifests never conflate
+//! its own tier so manifests never conflate isolation stacks
 //! the two stacks (isolation honesty).
 
 use crate::{

@@ -100,6 +100,7 @@ pub struct NetworkCandidate {
     /// Every observed attempt against this dependency failed.
     pub all_failed: bool,
     pub attempts: u64,
+    pub failures: u64,
 }
 
 /// One environment-provided executable observed during a trial
@@ -347,6 +348,7 @@ mod tests {
                 externally_controlled: true,
                 all_failed: true,
                 attempts: 2,
+                failures: 2,
             }],
             observed: true,
             ..Default::default()
@@ -357,6 +359,7 @@ mod tests {
                 externally_controlled: true,
                 all_failed: false,
                 attempts: 1,
+                failures: 0,
             }],
             observed: true,
             ..Default::default()

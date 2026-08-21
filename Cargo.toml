@@ -13,7 +13,6 @@ members = [
     "crates/ovid-observer",
     "crates/ovid-sandbox",
     "crates/ovid-gateway",
-    "crates/ovid-experiment",
     "crates/ovid-world",
     "crates/ovid-output",
     "crates/ovid-cli",
@@ -40,7 +39,6 @@ ovid-planner = { path = "crates/ovid-planner" }
 ovid-observer = { path = "crates/ovid-observer" }
 ovid-sandbox = { path = "crates/ovid-sandbox" }
 ovid-gateway = { path = "crates/ovid-gateway" }
-ovid-experiment = { path = "crates/ovid-experiment" }
 ovid-world = { path = "crates/ovid-world" }
 ovid-output = { path = "crates/ovid-output" }
 

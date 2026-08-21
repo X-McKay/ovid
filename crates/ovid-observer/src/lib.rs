@@ -1,7 +1,7 @@
 //! Boundary observers (spec §13.7, FR-030..FR-039).
 //!
 //! The production design attaches a small eBPF observer (Aya/libbpf-rs)
-//! inside the Firecracker guest. This crate defines the backend-neutral
+//! inside the laboratory guest. This crate defines the backend-neutral
 //! observer contract and ships the first interchangeable implementation: a
 //! ptrace-based observer built on `strace`, which works in any Linux
 //! environment without kernel privileges and produces the same normalized

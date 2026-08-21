@@ -22,7 +22,7 @@ fn normalized_inventory(fixture: &str) -> serde_json::Value {
     let fixture_path = fixtures().join(fixture);
     let output = Command::new(env!("CARGO_BIN_EXE_ovid"))
         .args([
-            "inventory",
+            "inspect",
             fixture_path.to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
@@ -31,7 +31,7 @@ fn normalized_inventory(fixture: &str) -> serde_json::Value {
         .expect("ovid runs");
     assert!(
         output.status.success(),
-        "inventory failed: {}",
+        "inspect failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let manifest: serde_json::Value =

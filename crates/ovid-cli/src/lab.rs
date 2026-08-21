@@ -20,14 +20,13 @@
 //!   (toolchain discovery online, `PATH`/`HOME` offline) plus explicit
 //!   extra variables reach the workload; secrets never do.
 
-use crate::pipeline::{BackendKind, OFFLINE_DEFAULT_ENV, ONLINE_DEFAULT_ENV};
+use anyhow::{bail, Result};
 use ovid_application::{
     ExecutableCandidate, LabCapabilities, LabError, LaboratoryPort, NetworkCandidate,
     PreparedEnvironment, ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
 };
 use ovid_core::{BoundaryEvent, Digest, EventEnvelope};
 use ovid_domain::{DependencyKey, EnforcementReport, Treatment, TrialOutcome, TrialRecord};
-use ovid_experiment::externally_controlled;
 use ovid_observer::aggregate;
 use ovid_packs::PackRegistry;
 use ovid_sandbox::{
@@ -36,6 +35,64 @@ use ovid_sandbox::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Which execution backend runs trials (spec §13.5: backend by policy;
+/// the chosen backend's isolation tier flows into provenance, never
+/// upgraded, never silently downgraded).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum BackendKind {
+    /// Supervised host process (trusted repositories, Linux/unix hosts).
+    #[default]
+    Process,
+    /// microsandbox libkrun guest VM (`msb`): always-Linux guest, works
+    /// on Linux/KVM, macOS/Apple Silicon, and Windows/WHP hosts.
+    Microsandbox,
+}
+
+impl BackendKind {
+    pub fn parse(name: &str) -> Result<BackendKind> {
+        match name {
+            "process" => Ok(BackendKind::Process),
+            "microsandbox" => Ok(BackendKind::Microsandbox),
+            other => bail!("unknown backend {other:?} (use process|microsandbox)"),
+        }
+    }
+
+    /// (backend name, isolation tier) as recorded in provenance.
+    pub fn identity(&self) -> (&'static str, &'static str) {
+        match self {
+            BackendKind::Process => ("ovid-process-backend", "trusted-process"),
+            BackendKind::Microsandbox => ("ovid-microsandbox-backend", "microvm-guest"),
+        }
+    }
+}
+
+/// Environment untreated (online) trials inherit by default: toolchain
+/// discovery plus proxy/CA plumbing. Names only — values come from the
+/// host at spawn time; everything else is scrubbed.
+pub(crate) const ONLINE_DEFAULT_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "CARGO_HTTP_CAINFO",
+    // JVM tooling reads proxy/truststore settings from its own variables,
+    // not from http_proxy.
+    "JAVA_TOOL_OPTIONS",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
+];
+/// Egress-denied trials only need toolchain discovery; the namespace
+/// blocks egress.
+pub(crate) const OFFLINE_DEFAULT_ENV: &[&str] = &["PATH", "HOME"];
 
 /// Resolve to an absolute path: backends change the working directory of
 /// spawned workloads, so relative workspace/trace paths would resolve
@@ -206,9 +263,10 @@ impl HostLaboratory {
             .iter()
             .map(|observation| NetworkCandidate {
                 key: DependencyKey::network(observation.identity()),
-                externally_controlled: externally_controlled(observation),
+                externally_controlled: observation.externally_controlled(),
                 all_failed: observation.all_failed(),
                 attempts: observation.attempts,
+                failures: observation.failures,
             })
             .collect();
         TrialObservations {

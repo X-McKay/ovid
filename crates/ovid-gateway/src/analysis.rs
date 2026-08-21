@@ -61,6 +61,15 @@ impl ExternalObservation {
             None => format!("{}:{}", self.address, self.port),
         }
     }
+
+    /// Whether this destination is under an experiment's control: an
+    /// isolated network namespace removes *external* reachability, but
+    /// loopback keeps working, so loopback destinations are never varied
+    /// by a network intervention and cannot be attributed by one
+    /// (spec §20).
+    pub fn externally_controlled(&self) -> bool {
+        !(self.address.starts_with("127.") || self.address == "::1")
+    }
 }
 
 /// A port the workload listened on (inbound interface discovery, §17.7).

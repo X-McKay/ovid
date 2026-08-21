@@ -250,6 +250,7 @@ pub fn external_candidate(identity: &str, all_failed: bool) -> NetworkCandidate 
         externally_controlled: true,
         all_failed,
         attempts: 3,
+        failures: if all_failed { 3 } else { 0 },
     }
 }
 

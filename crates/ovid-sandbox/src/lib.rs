@@ -2,24 +2,24 @@
 //!
 //! Two backends implement the [`ExecutionBackend`] contract:
 //!
-//! - [`process::ProcessBackend`] — the alternate faster backend the spec
-//!   allows for *trusted* repositories (FR-027 names gVisor/containers; a
-//!   supervised, resource-limited, environment-scrubbed process fills the
-//!   same role on hosts without KVM). It supports ephemeral copy-on-write
-//!   workspaces (clean-rerun semantics, FR-025), deadline enforcement,
-//!   rlimits, and strace observation. **It is not a security boundary for
-//!   hostile code** and says so in its isolation tier.
-//! - [`firecracker::FirecrackerBackend`] — the default untrusted-execution
-//!   boundary (ADR-002): jailer configuration, the five-device disk layout
-//!   of §13.5, vsock, and snapshot lifecycle, driven through Firecracker's
-//!   Unix-socket REST API (§34.5). On hosts without `/dev/kvm` it reports
-//!   `UnsupportedHost` rather than degrading silently.
+//! - [`process::ProcessBackend`] — supervised, resource-limited,
+//!   environment-scrubbed host process for *trusted* repositories
+//!   (FR-027 analog). Ephemeral copy-on-write workspaces (clean-rerun
+//!   semantics, FR-025), deadline enforcement, rlimits, strace
+//!   observation. **Not a security boundary for hostile code**, and says
+//!   so in its isolation tier.
+//! - [`microsandbox::MicrosandboxBackend`] — libkrun guest VMs via the
+//!   `msb` CLI: a real VM boundary with an always-Linux guest, portable
+//!   across Linux/KVM, macOS/Apple Silicon, and Windows/WHP hosts.
 //!
-//! The experiment loop chooses a backend by policy; evidence records carry
+//! A Firecracker MicroVM backend returns when it can execute the
+//! complete laboratory contract — prepare/snapshot/trial forks with
+//! enforcement provenance — rather than only VM configuration
+//! (proposal §8.3's deferral).
+//!
+//! The prove loop chooses a backend by policy; evidence records carry
 //! which backend produced them so trust tiers stay honest.
 
-#[cfg(unix)]
-pub mod firecracker;
 #[cfg(unix)]
 pub mod process;
 /// Non-unix hosts get honest stubs: static analysis works everywhere;
@@ -37,11 +37,9 @@ pub mod microsandbox;
 pub use microsandbox::MicrosandboxBackend;
 
 #[cfg(unix)]
-pub use firecracker::{FirecrackerBackend, VmSpec};
-#[cfg(unix)]
 pub use process::{network_isolation_available, ProcessBackend};
 #[cfg(not(unix))]
-pub use unsupported::{network_isolation_available, FirecrackerBackend, ProcessBackend, VmSpec};
+pub use unsupported::{network_isolation_available, ProcessBackend};
 
 use ovid_core::OvidError;
 use ovid_observer::ObservationReport;
@@ -55,12 +53,8 @@ use std::time::Duration;
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum IsolationTier {
-    /// KVM MicroVM boundary (Firecracker) — suitable for hostile
-    /// repositories. Only the Firecracker backend may claim this.
-    Microvm,
     /// libkrun guest VM boundary (microsandbox) — a real VM with an
-    /// always-Linux guest, distinct from `Microvm` so manifests never
-    /// conflate the two isolation stacks.
+    /// always-Linux guest.
     MicrovmGuest,
     /// Supervised process — trusted repositories only (FR-027 analog).
     TrustedProcess,

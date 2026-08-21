@@ -1,6 +1,6 @@
 # CLAUDE.md — working on Ovid
 
-Ovid is an evidence-driven repository execution tomography engine
+Ovid is an evidence-backed causal dependency verifier
 (see `docs/ovid_detailed_technical_spec.md` if present, and
 `docs/ARCHITECTURE.md` for the implemented shape). This file defines the
 conventions that keep the codebase consistent. Follow it for every change.
@@ -48,11 +48,12 @@ These come from the spec and are load-bearing; tests enforce most of them:
    generic evaluation code — never framework-specific analyzers in core
    crates.
 8. **Isolation honesty.** Every backend claims exactly its own tier in
-   manifests: the process backend `TrustedProcess`, the Firecracker
-   backend alone `Microvm`, the microsandbox backend alone
-   `MicrovmGuest` (libkrun guest VM). Never fall back silently from a
-   VM tier to process execution; unavailable backends fail construction
-   with `UnsupportedHost`.
+   provenance: the process backend `TrustedProcess`, the microsandbox
+   backend alone `MicrovmGuest` (libkrun guest VM). Never fall back
+   silently from a VM tier to process execution; unavailable backends
+   fail construction with `UnsupportedHost`, and laboratory
+   capabilities are truthful (a capability is claimed only when its
+   mechanism exists).
 9. **No secrets in outputs.** The sandbox scrubs the environment; new
    code paths must not copy host environment or credentials into
    ledgers, manifests, logs, or world locks (generated secrets are
@@ -88,7 +89,7 @@ These come from the spec and are load-bearing; tests enforce most of them:
   in `[workspace.dependencies]` and inherited with `.workspace = true`.
 - Crate layering (no cycles):
   `core -> {domain, evidence, repository} -> {application, inventory, packs} ->
-  {planner, observer, sandbox, gateway} -> {experiment, world, output} -> cli`.
+  {planner, observer, sandbox, gateway} -> {world, output} -> cli`.
   New crates slot into this order; the CLI is the only place that wires
   everything together. Two extra rules from the 0.2 architecture
   (proposal §5.1): `ovid-domain` stays pure (no I/O, no process, no

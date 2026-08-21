@@ -430,7 +430,6 @@ dependencies = [
  "ovid-core",
  "ovid-domain",
  "ovid-evidence",
- "ovid-experiment",
  "ovid-gateway",
  "ovid-inventory",
  "ovid-observer",
@@ -476,18 +475,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "ovid-experiment"
-version = "0.1.0"
-dependencies = [
- "ovid-core",
- "ovid-gateway",
- "ovid-packs",
- "ovid-world",
- "serde",
- "serde_json",
 ]
 
 [[package]]

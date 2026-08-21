@@ -1,23 +1,29 @@
-//! The `prove`, `replay`, `inspect`, and `doctor` commands — the 0.2
-//! surface (proposal §4) wired through the application use cases.
+//! The `prove`, `replay`, and `doctor` commands — the primary loop of
+//! the 0.2 surface (proposal §4) wired through the application use
+//! cases.
 //!
-//! `prove` is the primary loop (proposal §9.2): the CLI resolves the
-//! source, selects a workload, composes a laboratory + ledger journal +
-//! terminal progress, and hands control to `ovid_application::prove`.
-//! Everything written to disk is a projection of the typed journal and
-//! the returned report; the terminal shows conclusions, the bundle keeps
-//! the raw material (proposal §4.4).
+//! `prove` (proposal §9.2): the CLI resolves the source, selects a
+//! workload, composes a laboratory + ledger journal + terminal progress,
+//! and hands control to `ovid_application::prove`. Everything written to
+//! disk is a projection of the typed journal and the returned report —
+//! including the manifest, so `ovid diff` compares causal models across
+//! revisions (proposal §9.5). The terminal shows conclusions; the bundle
+//! keeps the raw material (proposal §4.4).
 
-use crate::lab::HostLaboratory;
-use crate::pipeline::{self, BackendKind};
+use crate::inspect_cmd::{acquire_snapshot, repository_section};
+use crate::lab::{BackendKind, HostLaboratory};
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use ovid_application::{
     prove, run_clean_replay, JournalError, JournalEvent, JournalPort, LaboratoryPort, ProgressPort,
     ProvePolicy, ProveReport, ProveRequest,
 };
-use ovid_core::{Digest, IdGenerator, OvidId, TrustTier};
-use ovid_domain::{AnalysisScope, Necessity, WorldOutcome};
+use ovid_core::{CausalClassification, Digest, IdGenerator, OvidId, TrustTier};
+use ovid_domain::{AnalysisScope, DependencyKind, Necessity, WorldOutcome};
 use ovid_evidence::{Claim, ClaimStore, EvidenceLedger, EvidenceRecord};
+use ovid_output::{
+    ExternalSystemReport, Manifest, RepositorySection, ToolReport, UnresolvedItem, WorkloadReport,
+    WorldDependencySummary,
+};
 use ovid_packs::PackRegistry;
 use ovid_planner::ActionKind;
 use ovid_world::{SuccessSpec, Treatment as WorldTreatment, World, WorldDependency, WorldStatus};
@@ -176,7 +182,7 @@ pub fn run_prove(
     let registry = open_registry(options.packs_dir.as_deref())?;
 
     // Resolve source + select workload.
-    let snapshot = pipeline::acquire_snapshot(locator, reference, &out_dir)?;
+    let snapshot = acquire_snapshot(locator, reference, &out_dir)?;
     let graph = ovid_planner::plan(&snapshot, &registry);
     let (workload_name, workload_argv) = match &options.argv {
         Some(argv) if !argv.is_empty() => (options.workload.clone(), argv.clone()),
@@ -229,6 +235,12 @@ pub fn run_prove(
         ..Default::default()
     };
 
+    let meta = BundleMeta {
+        analysis_id: ids.next("analysis").to_string(),
+        repository: repository_section(&snapshot),
+        backend: options.backend.clone(),
+        packs: registry.all().iter().map(|p| p.label()).collect(),
+    };
     let mut lab = HostLaboratory::new(
         options.backend.clone(),
         &options.guest_image,
@@ -254,7 +266,7 @@ pub fn run_prove(
     let report = prove(&mut lab, &mut journal, &TerminalProgress, &request, &policy)
         .map_err(|e| anyhow!("prove failed: {e}"))?;
 
-    write_bundle(&out_dir, &report, &mut journal)?;
+    write_bundle(&out_dir, &report, &mut journal, &meta)?;
     if options.json {
         println!("{}", serde_json::to_string_pretty(&proof_value(&report))?);
     } else {
@@ -285,9 +297,168 @@ fn proof_value(report: &ProveReport) -> serde_json::Value {
     value
 }
 
-/// Write the bundle projections: proof.json, timings.json, claims, world
-/// lock + compose. Standards exports stay lazy (proposal §14.10).
-fn write_bundle(out_dir: &Path, report: &ProveReport, journal: &mut LedgerJournal) -> Result<()> {
+/// Provenance context for the bundle projections.
+struct BundleMeta {
+    analysis_id: String,
+    repository: RepositorySection,
+    backend: BackendKind,
+    packs: Vec<String>,
+}
+
+/// Map a causal necessity onto the claim-state vocabulary.
+fn causality_of(necessity: Necessity) -> CausalClassification {
+    match necessity {
+        Necessity::Required => CausalClassification::Required,
+        Necessity::Optional => CausalClassification::Optional,
+        Necessity::Unresolved => CausalClassification::Unresolved,
+    }
+}
+
+/// Project the prove report into the manifest document (proposal §12.3):
+/// the same evidence-backed shape `inspect` writes, populated with the
+/// dynamic story, so `ovid diff` compares causal models across
+/// revisions (proposal §9.5).
+fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
+    let mut manifest = Manifest::new(meta.analysis_id.clone(), "prove", meta.repository.clone());
+    let (backend_name, isolation_tier) = meta.backend.identity();
+    manifest.analysis.backend = Some(backend_name.into());
+    manifest.analysis.isolation_tier = Some(isolation_tier.into());
+    manifest.analysis.runs.total = report.trials_executed as u32;
+    manifest.analysis.runs.successful =
+        report.trials.iter().filter(|t| t.outcome.passed).count() as u32;
+    manifest.analysis.runs.failed =
+        report.trials.iter().filter(|t| !t.outcome.passed).count() as u32;
+
+    if let Some(argv) = &report.provision_argv {
+        manifest.build.commands.push(argv.clone());
+    }
+    manifest
+        .build
+        .commands
+        .push(report.scope.workload_argv.clone());
+    manifest.workloads.push(WorkloadReport {
+        id: format!("workload:{}", report.scope.workload),
+        name: report.scope.workload.clone(),
+        command: report.scope.workload_argv.clone(),
+        success_predicate: report.scope.success_predicate.clone(),
+        status: if report.baseline.supports_experiments() {
+            "passed".into()
+        } else {
+            "failed".into()
+        },
+        duration_ms: None,
+        world_digest: None,
+    });
+
+    let conclusion_for = |kind: DependencyKind, identity: &str| {
+        report.conclusions.iter().find(|c| {
+            c.conclusion.dependency().kind == kind
+                && c.conclusion.dependency().logical_identity == identity
+        })
+    };
+
+    // Network candidates -> external systems with causal labels.
+    for candidate in &report.network_candidates {
+        let identity = &candidate.key.logical_identity;
+        let (host, port) = identity
+            .rsplit_once(':')
+            .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p)))
+            .unwrap_or_else(|| (identity.clone(), 0));
+        let named = host.chars().any(|c| c.is_ascii_alphabetic());
+        let classified = conclusion_for(DependencyKind::NetworkService, identity);
+        manifest.external_systems.push(ExternalSystemReport {
+            id: identity.clone(),
+            protocol: "unknown".into(),
+            address: host.clone(),
+            port,
+            dns_name: named.then(|| host.clone()),
+            endpoints: Vec::new(),
+            identity: if named {
+                "dns-name".into()
+            } else {
+                "ip-only".into()
+            },
+            declared: false,
+            attempts: candidate.attempts,
+            failures: candidate.failures,
+            outcomes: Vec::new(),
+            causality: Some(
+                classified
+                    .map(|c| causality_of(c.conclusion.necessity()))
+                    .unwrap_or(CausalClassification::Unresolved),
+            ),
+            treatment: None,
+            url_path: None,
+            env_var: None,
+            credential_env: Vec::new(),
+            declared_sources: Vec::new(),
+            evidence: classified
+                .map(|c| vec![c.evidence.clone()])
+                .unwrap_or_default(),
+        });
+    }
+
+    // Executable candidates -> build tools with causal labels; missing
+    // tools carry their resolver-pack install hint as remediation.
+    for candidate in &report.executable_candidates {
+        let classified = conclusion_for(DependencyKind::Executable, &candidate.name);
+        manifest.build.tools.push(ToolReport {
+            name: candidate.name.clone(),
+            causality: Some(
+                classified
+                    .map(|c| causality_of(c.conclusion.necessity()))
+                    .unwrap_or(CausalClassification::Unresolved),
+            ),
+            discovered_by: Some(if candidate.found {
+                "observed-exec".into()
+            } else {
+                "failed-search".into()
+            }),
+            candidate_package: candidate.resolver_hint.clone(),
+        });
+    }
+
+    for classified in &report.conclusions {
+        if classified.conclusion.necessity() == Necessity::Unresolved {
+            manifest.unresolved.push(UnresolvedItem {
+                id: classified.conclusion.dependency().describe(),
+                reason: classified.conclusion.reason().to_string(),
+                evidence: vec![classified.evidence.clone()],
+            });
+        }
+    }
+
+    manifest.completeness.limitations = report.limitations.clone();
+    manifest.world.status = report.world.label().into();
+    if let WorldOutcome::Proposed { world, .. } | WorldOutcome::ReplayFailed { world, .. } =
+        &report.world
+    {
+        manifest.world.lock_digest = Some(world.digest().clone());
+    }
+    if let WorldOutcome::Verified { world } = &report.world {
+        manifest.world.lock_digest = Some(world.world().digest().clone());
+    }
+    for classified in &report.conclusions {
+        if classified.conclusion.necessity() == Necessity::Required {
+            manifest.world.dependencies.push(WorldDependencySummary {
+                id: classified.conclusion.dependency().describe(),
+                treatment: "required".into(),
+            });
+        }
+    }
+    manifest.provenance.packs = meta.packs.clone();
+    manifest
+}
+
+/// Write the bundle projections: manifest, proof.json, timings.json,
+/// claims, world lock + compose. Standards exports stay lazy
+/// (proposal §14.10) — render them with `ovid export`.
+fn write_bundle(
+    out_dir: &Path,
+    report: &ProveReport,
+    journal: &mut LedgerJournal,
+    meta: &BundleMeta,
+) -> Result<()> {
     std::fs::write(
         out_dir.join("proof.json"),
         serde_json::to_string_pretty(&proof_value(report))?,
@@ -382,6 +553,20 @@ fn write_bundle(out_dir: &Path, report: &ProveReport, journal: &mut LedgerJourna
         std::fs::write(out_dir.join("world.lock.yaml"), lock.to_yaml())?;
         std::fs::write(out_dir.join("compose.yaml"), lock.to_compose_yaml())?;
     }
+
+    // Manifest projection, written last so its provenance publishes the
+    // final evidence chain head and the summary is a projection of the
+    // finished sections.
+    let mut manifest = manifest_from_report(report, meta);
+    manifest.metadata.status = if manifest.unresolved.is_empty() {
+        "complete".into()
+    } else {
+        "complete-with-unresolved".into()
+    };
+    manifest.provenance.evidence_chain_head = journal.ledger.chain_head().cloned();
+    manifest.summary = manifest.build_summary();
+    std::fs::write(out_dir.join("ovid.yaml"), manifest.to_yaml_annotated())?;
+    std::fs::write(out_dir.join("ovid.json"), manifest.to_json_pretty())?;
     Ok(())
 }
 
@@ -489,7 +674,7 @@ pub fn run_replay(
         .strip_prefix("file://")
         .unwrap_or(&scope.repository)
         .to_string();
-    let snapshot = pipeline::acquire_snapshot(&locator, None, bundle)?;
+    let snapshot = acquire_snapshot(&locator, None, bundle)?;
     if snapshot.revision != scope.revision {
         eprintln!(
             "warning: source is now at {} but the proof was for {}; replay verifies the \
@@ -572,7 +757,6 @@ pub fn run_doctor() -> Result<()> {
     let git = which("git");
     let strace = ovid_observer::strace_available();
     let userns = ovid_sandbox::network_isolation_available();
-    let kvm = Path::new("/dev/kvm").exists();
     let msb = which("msb") || std::env::var_os("OVID_MSB_BIN").is_some();
 
     println!("ovid doctor — host capability report\n");
@@ -607,10 +791,6 @@ pub fn run_doctor() -> Result<()> {
     if !msb {
         println!("       -> https://microsandbox.dev — required to prove remote repos safely");
     }
-    println!(
-        "[{}] /dev/kvm            Firecracker MicroVM backend (optional)",
-        check(kvm)
-    );
     println!();
     let lab_ready = strace && userns;
     if lab_ready {
@@ -630,53 +810,4 @@ fn which(binary: &str) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-/// Run `ovid inspect` (proposal §4.2): static-only, never executes
-/// repository code, ends with ranked workload candidates so the next
-/// step (`ovid prove --workload …`) is obvious.
-pub fn run_inspect(
-    locator: &str,
-    reference: Option<String>,
-    out: &Path,
-    packs_dir: Option<&Path>,
-    json: bool,
-) -> Result<()> {
-    let bundle = pipeline::run_inventory(locator, reference.clone(), out, packs_dir)?;
-    if json {
-        println!("{}", bundle.manifest.to_json_pretty());
-        return Ok(());
-    }
-    pipeline::print_summary(&bundle);
-
-    // Ranked workload candidates from the planner (static, not executed).
-    let registry = open_registry(packs_dir)?;
-    let snapshot = pipeline::acquire_snapshot(locator, reference, out)?;
-    let graph = ovid_planner::plan(&snapshot, &registry);
-    println!("\nworkload candidates (static ranking; nothing was executed):");
-    for kind in [
-        ActionKind::DependencyInstall,
-        ActionKind::Build,
-        ActionKind::Test,
-        ActionKind::Start,
-    ] {
-        if let Some(action) = graph.best(kind) {
-            let label = match kind {
-                ActionKind::DependencyInstall => "install",
-                ActionKind::Build => "build",
-                ActionKind::Test => "test",
-                ActionKind::Start => "start",
-                _ => "other",
-            };
-            println!(
-                "  {:<8} `{}`  (score {:.2}, {})",
-                label,
-                action.command.join(" "),
-                action.score,
-                action.source_file.as_deref().unwrap_or("mined")
-            );
-        }
-    }
-    println!("\nnext: ovid prove {locator} --workload test");
-    Ok(())
 }
