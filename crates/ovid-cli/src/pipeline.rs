@@ -41,11 +41,56 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Which execution backend runs workloads (spec §13.5: backend by policy;
+/// the chosen backend's isolation tier flows into the manifest,
+/// never upgraded, never silently downgraded).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum BackendKind {
+    /// Supervised host process (trusted repositories, Linux/unix hosts).
+    #[default]
+    Process,
+    /// microsandbox libkrun guest VM (`msb`): always-Linux guest, works
+    /// on Linux/KVM, macOS/Apple Silicon, and Windows/WHP hosts.
+    Microsandbox,
+}
+
+impl BackendKind {
+    pub fn parse(name: &str) -> Result<BackendKind> {
+        match name {
+            "process" => Ok(BackendKind::Process),
+            "microsandbox" => Ok(BackendKind::Microsandbox),
+            other => bail!("unknown backend {other:?} (use process|microsandbox)"),
+        }
+    }
+
+    /// (backend name, isolation tier) as recorded in manifests.
+    fn identity(&self) -> (&'static str, &'static str) {
+        match self {
+            BackendKind::Process => ("ovid-process-backend", "trusted-process"),
+            BackendKind::Microsandbox => ("ovid-microsandbox-backend", "microvm-guest"),
+        }
+    }
+
+    /// Whether NetworkMode::Isolated is available under this backend on
+    /// this host: the guest VM has native default-deny (`--no-net`); the
+    /// process backend needs unprivileged user namespaces.
+    fn isolation_available(&self) -> bool {
+        match self {
+            BackendKind::Process => network_isolation_available(),
+            BackendKind::Microsandbox => true,
+        }
+    }
+}
+
 pub struct ExecutionOptions {
     pub in_place: bool,
     pub inherit_env: Vec<String>,
     pub timeout_seconds: u64,
     pub counterfactual_env: Vec<String>,
+    pub backend: BackendKind,
+    /// Guest image for the microsandbox backend (must carry the
+    /// repository's toolchains).
+    pub guest_image: String,
 }
 
 /// A completed analysis bundle.
@@ -533,7 +578,13 @@ fn execute_workload(
     workload_name: &str,
     network: NetworkMode,
 ) -> Result<WorkloadExecution> {
-    let backend = ProcessBackend::new().map_err(|e| anyhow!("{e}"))?;
+    let backend: Box<dyn ExecutionBackend> = match options.backend {
+        BackendKind::Process => Box::new(ProcessBackend::new().map_err(|e| anyhow!("{e}"))?),
+        BackendKind::Microsandbox => Box::new(
+            ovid_sandbox::MicrosandboxBackend::new(&options.guest_image)
+                .map_err(|e| anyhow!("{e}"))?,
+        ),
+    };
     let workspace = if options.in_place {
         WorkspaceMode::InPlace {
             root: snapshot.root.clone(),
@@ -1017,8 +1068,9 @@ pub fn run_observe(
         "observe",
         repository_section(&snapshot),
     );
-    manifest.analysis.backend = Some("ovid-process-backend".into());
-    manifest.analysis.isolation_tier = Some("trusted-process".into());
+    let (backend_name, isolation_tier) = options.backend.identity();
+    manifest.analysis.backend = Some(backend_name.into());
+    manifest.analysis.isolation_tier = Some(isolation_tier.into());
     manifest.inventory.languages = report.languages.clone();
     manifest.inventory.components = report.components.clone();
     manifest.inventory.scanned_files = report.scanned_files.clone();
@@ -1071,8 +1123,9 @@ pub fn run_analyze(
         "explore",
         repository_section(&snapshot),
     );
-    manifest.analysis.backend = Some("ovid-process-backend".into());
-    manifest.analysis.isolation_tier = Some("trusted-process".into());
+    let (backend_name, isolation_tier) = options.backend.identity();
+    manifest.analysis.backend = Some(backend_name.into());
+    manifest.analysis.isolation_tier = Some(isolation_tier.into());
     manifest.inventory.languages = report.languages.clone();
     manifest.inventory.components = report.components.clone();
     manifest.inventory.scanned_files = report.scanned_files.clone();
@@ -1158,6 +1211,8 @@ pub fn run_analyze(
                     .collect(),
                 timeout_seconds: options.timeout_seconds,
                 counterfactual_env: vec![],
+                backend: options.backend.clone(),
+                guest_image: options.guest_image.clone(),
             };
             variant_options.inherit_env.retain(|v| v != variable);
             let variant = execute_workload(
@@ -1360,6 +1415,8 @@ pub struct TomographyOptions {
     pub max_candidates: usize,
     /// Skip the default PATH/HOME/proxy inheritance (fully scrubbed env).
     pub no_default_env: bool,
+    pub backend: BackendKind,
+    pub guest_image: String,
 }
 
 /// Environment the online legs get by default: toolchain discovery plus
@@ -1407,14 +1464,15 @@ pub fn run_tomography(
         "tomography",
         repository_section(&snapshot),
     );
-    manifest.analysis.backend = Some("ovid-process-backend".into());
-    manifest.analysis.isolation_tier = Some("trusted-process".into());
+    let (backend_name, isolation_tier) = options.backend.identity();
+    manifest.analysis.backend = Some(backend_name.into());
+    manifest.analysis.isolation_tier = Some(isolation_tier.into());
     manifest.inventory.languages = report.languages.clone();
     manifest.inventory.components = report.components.clone();
     manifest.inventory.scanned_files = report.scanned_files.clone();
     manifest.completeness.warnings = report.warnings.clone();
 
-    let isolation = network_isolation_available();
+    let isolation = options.backend.isolation_available();
     if !isolation {
         manifest.completeness.limitations.push(
             "network isolation unavailable (no unprivileged user namespaces): offline runs \
@@ -1465,6 +1523,8 @@ pub fn run_tomography(
         inherit_env: inherit.to_vec(),
         timeout_seconds: options.timeout_seconds,
         counterfactual_env: vec![],
+        backend: options.backend.clone(),
+        guest_image: options.guest_image.clone(),
     };
     let online_options = make_options(&online_env);
     let offline_options = make_options(&offline_env);
@@ -1616,7 +1676,11 @@ pub fn run_tomography(
                 &label,
                 &offline,
                 &online,
-                isolation,
+                match (&options.backend, isolation) {
+                    (BackendKind::Microsandbox, true) => "guest-no-net",
+                    (BackendKind::Process, true) => "user-netns",
+                    (_, false) => "proxy-env-strip",
+                },
             )?;
             last_online = Some((online, action.command.clone()));
         }
@@ -1678,7 +1742,7 @@ fn classify_pair(
     kind_name: &str,
     offline: &WorkloadExecution,
     online: &WorkloadExecution,
-    isolation: bool,
+    isolation_label: &'static str,
 ) -> Result<()> {
     let offline_passed = offline.result.success();
     let online_passed = online.result.success();
@@ -1748,7 +1812,7 @@ fn classify_pair(
                 "online_passed": online_passed,
                 "classification": verdict.classification,
                 "group_level": verdict.group_level,
-                "isolation": if isolation { "user-netns" } else { "proxy-env-strip" },
+                "isolation": isolation_label,
             }),
             Some(offline.run_id.clone()),
         )?;

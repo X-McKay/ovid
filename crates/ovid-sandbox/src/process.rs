@@ -9,7 +9,7 @@
 use crate::{ExecutionBackend, IsolationTier, NetworkMode, RunResult, RunSpec, WorkspaceMode};
 use ovid_core::{IdGenerator, OvidError};
 use ovid_observer::{BoundaryObserver, StraceObserver};
-use std::io::Read;
+
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -251,22 +251,7 @@ impl ExecutionBackend for ProcessBackend {
     }
 }
 
-fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = reader.read_to_end(&mut buffer);
-        buffer
-    })
-}
-
-fn tail_string(bytes: &[u8], max: usize) -> String {
-    let slice = if bytes.len() > max {
-        &bytes[bytes.len() - max..]
-    } else {
-        bytes
-    };
-    String::from_utf8_lossy(slice).into_owned()
-}
+use crate::{spawn_reader, tail_string};
 
 #[cfg(test)]
 mod tests {

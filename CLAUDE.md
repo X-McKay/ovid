@@ -47,10 +47,12 @@ These come from the spec and are load-bearing; tests enforce most of them:
    language/tool/service/protocol support goes into `packs/*.yaml` and
    generic evaluation code — never framework-specific analyzers in core
    crates.
-8. **Isolation honesty.** The process backend is for trusted
-   repositories; its `IsolationTier::TrustedProcess` must flow into
-   manifests. Only the Firecracker backend may claim `Microvm`. Never
-   fall back silently from MicroVM to process execution.
+8. **Isolation honesty.** Every backend claims exactly its own tier in
+   manifests: the process backend `TrustedProcess`, the Firecracker
+   backend alone `Microvm`, the microsandbox backend alone
+   `MicrovmGuest` (libkrun guest VM). Never fall back silently from a
+   VM tier to process execution; unavailable backends fail construction
+   with `UnsupportedHost`.
 9. **No secrets in outputs.** The sandbox scrubs the environment; new
    code paths must not copy host environment or credentials into
    ledgers, manifests, logs, or world locks (generated secrets are

@@ -28,6 +28,14 @@ pub mod process;
 #[cfg(not(unix))]
 mod unsupported;
 
+/// The microsandbox (libkrun) guest-VM backend is portable by design:
+/// `msb` runs on Linux (KVM), macOS (Apple Silicon), and Windows (WHP),
+/// and the guest is always Linux — so observation and network
+/// counterfactuals behave identically on every host.
+pub mod microsandbox;
+
+pub use microsandbox::MicrosandboxBackend;
+
 #[cfg(unix)]
 pub use firecracker::{FirecrackerBackend, VmSpec};
 #[cfg(unix)]
@@ -47,8 +55,13 @@ use std::time::Duration;
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum IsolationTier {
-    /// KVM MicroVM boundary — suitable for hostile repositories.
+    /// KVM MicroVM boundary (Firecracker) — suitable for hostile
+    /// repositories. Only the Firecracker backend may claim this.
     Microvm,
+    /// libkrun guest VM boundary (microsandbox) — a real VM with an
+    /// always-Linux guest, distinct from `Microvm` so manifests never
+    /// conflate the two isolation stacks.
+    MicrovmGuest,
     /// Supervised process — trusted repositories only (FR-027 analog).
     TrustedProcess,
 }
@@ -165,6 +178,28 @@ pub trait ExecutionBackend {
     fn name(&self) -> &'static str;
     fn isolation_tier(&self) -> IsolationTier;
     fn run(&self, spec: &RunSpec) -> Result<RunResult, OvidError>;
+}
+
+/// Drain a child stream on a thread so a chatty workload cannot deadlock
+/// on a full pipe while the supervisor waits.
+pub(crate) fn spawn_reader<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = reader.read_to_end(&mut buffer);
+        buffer
+    })
+}
+
+/// Bounded UTF-8 tail of captured output.
+pub(crate) fn tail_string(bytes: &[u8], max: usize) -> String {
+    let slice = if bytes.len() > max {
+        &bytes[bytes.len() - max..]
+    } else {
+        bytes
+    };
+    String::from_utf8_lossy(slice).into_owned()
 }
 
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];

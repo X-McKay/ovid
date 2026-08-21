@@ -63,6 +63,14 @@ enum Command {
         /// Wall-clock timeout in seconds.
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// Execution backend: `process` (supervised host process) or
+        /// `microsandbox` (libkrun guest VM via the `msb` CLI; observation
+        /// and network counterfactuals run inside an always-Linux guest).
+        #[arg(long, default_value = "process")]
+        backend: String,
+        /// Guest image for the microsandbox backend.
+        #[arg(long = "guest-image", default_value = "ubuntu")]
+        guest_image: String,
         #[arg(long = "packs-dir")]
         packs_dir: Option<PathBuf>,
         #[arg(long)]
@@ -89,6 +97,14 @@ enum Command {
         /// required by re-running without them (repeatable).
         #[arg(long = "counterfactual-env")]
         counterfactual_env: Vec<String>,
+        /// Execution backend: `process` (supervised host process) or
+        /// `microsandbox` (libkrun guest VM via the `msb` CLI; observation
+        /// and network counterfactuals run inside an always-Linux guest).
+        #[arg(long, default_value = "process")]
+        backend: String,
+        /// Guest image for the microsandbox backend.
+        #[arg(long = "guest-image", default_value = "ubuntu")]
+        guest_image: String,
         #[arg(long = "packs-dir")]
         packs_dir: Option<PathBuf>,
         #[arg(long)]
@@ -125,6 +141,14 @@ enum Command {
         /// Per-run wall-clock timeout in seconds.
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
+        /// Execution backend: `process` (supervised host process) or
+        /// `microsandbox` (libkrun guest VM via the `msb` CLI; observation
+        /// and network counterfactuals run inside an always-Linux guest).
+        #[arg(long, default_value = "process")]
+        backend: String,
+        /// Guest image for the microsandbox backend.
+        #[arg(long = "guest-image", default_value = "ubuntu")]
+        guest_image: String,
         #[arg(long = "packs-dir")]
         packs_dir: Option<PathBuf>,
         #[arg(long)]
@@ -212,6 +236,8 @@ fn main() -> Result<()> {
             in_place,
             inherit_env,
             timeout,
+            backend,
+            guest_image,
             packs_dir,
             json,
         } => {
@@ -220,6 +246,8 @@ fn main() -> Result<()> {
                 inherit_env,
                 timeout_seconds: timeout,
                 counterfactual_env: vec![],
+                backend: pipeline::BackendKind::parse(&backend)?,
+                guest_image,
             };
             let bundle = pipeline::run_observe(
                 &locator,
@@ -245,6 +273,8 @@ fn main() -> Result<()> {
             inherit_env,
             timeout,
             counterfactual_env,
+            backend,
+            guest_image,
             packs_dir,
             json,
         } => {
@@ -254,6 +284,8 @@ fn main() -> Result<()> {
                 inherit_env,
                 timeout_seconds: timeout,
                 counterfactual_env,
+                backend: pipeline::BackendKind::parse(&backend)?,
+                guest_image,
             };
             let bundle = pipeline::run_analyze(
                 &locator,
@@ -280,6 +312,8 @@ fn main() -> Result<()> {
             no_default_env,
             max_candidates,
             timeout,
+            backend,
+            guest_image,
             packs_dir,
             json,
         } => {
@@ -290,6 +324,8 @@ fn main() -> Result<()> {
                 timeout_seconds: timeout,
                 max_candidates,
                 no_default_env,
+                backend: pipeline::BackendKind::parse(&backend)?,
+                guest_image,
             };
             let bundle = pipeline::run_tomography(
                 &locator,

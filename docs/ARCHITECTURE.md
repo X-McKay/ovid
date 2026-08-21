@@ -164,6 +164,30 @@ and base rootfs containing the guest agent, plus the jailer installed;
 the payload generators are unit-tested so a worker integration is wiring,
 not design.
 
+### microsandbox backend (host-independent guest VMs)
+
+`ovid-sandbox/src/microsandbox.rs` drives the `msb` CLI
+(libkrun VMs; Linux/KVM, macOS/Apple Silicon, Windows/WHP). The guest is
+always Linux, so the strace observer and the offline/online
+counterfactual behave identically regardless of host OS:
+
+- the workspace is mounted at `/workspace` (workdir), with HOME/TMPDIR
+  scoped inside it; only explicitly inherited variables reach the guest
+  (host PATH/HOME never do — they are host-specific);
+- `NetworkMode::Isolated` maps to `msb run --no-net`, a true
+  default-deny for the guest, so tomography's offline leg needs no user
+  namespaces here;
+- observation wraps the command with strace writing into the mounted
+  workspace when the guest image ships strace (probed once, lazily);
+  otherwise the run is honestly unobserved (`observation: None`);
+- isolation is reported as `IsolationTier::MicrovmGuest` — a real VM
+  boundary kept distinct from Firecracker's `Microvm` tier, and absence
+  of the `msb` CLI fails construction with `UnsupportedHost`
+  (never a silent fallback).
+
+Select it with `--backend microsandbox --guest-image <image>` on
+`observe`, `analyze`, and `tomography`.
+
 ## Gateway
 
 `ovid-gateway` implements the Chameleon Gateway's decision plane

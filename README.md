@@ -102,11 +102,14 @@ Key decisions (full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)):
   come only from rerun comparisons or natural counterfactuals (workload
   succeeded while a dependency was down); everything else is
   `unresolved`.
-- **Two execution backends.** A supervised process sandbox (trusted
-  repositories; works everywhere) and a Firecracker MicroVM layer
-  (untrusted code; jailer + read-only source device + overlay + vsock +
-  snapshots) that fails closed on hosts without KVM. Manifests always
-  record which isolation tier produced the evidence.
+- **Three execution backends.** A supervised process sandbox (trusted
+  repositories, unix hosts), a Firecracker MicroVM layer (untrusted
+  code; jailer + read-only source device + overlay + vsock + snapshots)
+  that fails closed on hosts without KVM, and a microsandbox (libkrun)
+  guest-VM backend (`--backend microsandbox`) whose guest is always
+  Linux — so observation and network counterfactuals work identically
+  on Linux/KVM, macOS/Apple Silicon, and Windows/WHP hosts. Manifests
+  always record which isolation tier produced the evidence.
 - **Packs over analyzers.** Ecosystem knowledge is declarative YAML
   evaluated by generic code.
 
@@ -114,10 +117,16 @@ Key decisions (full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)):
 
 ### Prerequisites
 
-- Linux, Rust 1.85+ (`rustup` recommended)
+- Rust 1.85+ (`rustup` recommended). Linux for full native execution;
+  the workspace also compiles on macOS and Windows (static analysis
+  everywhere; native execution needs a unix host, and guest-VM
+  execution needs the microsandbox CLI below)
 - `strace` for boundary observation (`apt-get install strace`)
 - `git` for URL-based acquisition
 - Optional: `/dev/kvm` + Firecracker for the MicroVM backend
+- Optional: the `msb` CLI (<https://microsandbox.dev>) for
+  `--backend microsandbox` — libkrun guest VMs on Linux/KVM,
+  macOS/Apple Silicon, or Windows/WHP
 
 ### Build and run
 
