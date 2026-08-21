@@ -189,7 +189,7 @@ fn configured_resolvers() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn acquire_snapshot(
+pub(crate) fn acquire_snapshot(
     locator: &str,
     reference: Option<String>,
     out_dir: &Path,
@@ -1421,7 +1421,7 @@ pub struct TomographyOptions {
 
 /// Environment the online legs get by default: toolchain discovery plus
 /// proxy/CA plumbing (the online leg exists to have network access).
-const ONLINE_DEFAULT_ENV: &[&str] = &[
+pub(crate) const ONLINE_DEFAULT_ENV: &[&str] = &[
     "PATH",
     "HOME",
     "https_proxy",
@@ -1443,7 +1443,7 @@ const ONLINE_DEFAULT_ENV: &[&str] = &[
     "GRADLE_OPTS",
 ];
 /// Offline legs only need toolchain discovery; the namespace blocks egress.
-const OFFLINE_DEFAULT_ENV: &[&str] = &["PATH", "HOME"];
+pub(crate) const OFFLINE_DEFAULT_ENV: &[&str] = &["PATH", "HOME"];
 
 pub fn run_tomography(
     locator: &str,

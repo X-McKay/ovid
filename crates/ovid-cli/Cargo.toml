@@ -1,6 +1,6 @@
 [package]
 name = "ovid-cli"
-description = "Ovid command-line interface: inventory, observe, analyze, explain, world export, diff, packs"
+description = "Ovid command-line interface: inspect, prove, replay, explain, diff, doctor (+ legacy modes)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 ovid-core.workspace = true
+ovid-domain.workspace = true
+ovid-application.workspace = true
 ovid-evidence.workspace = true
 ovid-repository.workspace = true
 ovid-inventory.workspace = true

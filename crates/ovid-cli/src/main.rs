@@ -1,11 +1,16 @@
-//! Ovid CLI (spec §13.1).
+//! Ovid CLI.
 //!
-//! Subcommand surface mirrors the spec's representative commands:
-//! `inventory`, `observe`, `analyze`, `explain`, `world export`, `diff`,
-//! and `packs`. Output is concise by default; every analysis writes a full
-//! output bundle (§3.2) to `--out`.
+//! The 0.2 surface (proposal §4) is task-oriented: `inspect` (static,
+//! fast), `prove` (the primary causal loop), `replay` (re-verify a
+//! world), `explain`, `diff`, and `doctor`. The 0.1 commands
+//! (`inventory`, `observe`, `analyze`, `tomography`, `world`, `packs`)
+//! remain available while the strangler migration completes
+//! (proposal §18); `inventory` is an alias-level equivalent of
+//! `inspect`.
 
+mod lab;
 mod pipeline;
+mod prove_cmd;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -26,7 +31,96 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Non-executing static inventory of a repository (mode `inventory`).
+    /// Static inspection: composition, declared endpoints, and ranked
+    /// workload candidates. Never executes repository code.
+    Inspect {
+        /// Repository locator: local path or git URL.
+        locator: String,
+        /// Git reference (branch/tag) for URL locators.
+        #[arg(long = "ref")]
+        reference: Option<String>,
+        /// Output bundle directory.
+        #[arg(long, default_value = "ovid-output")]
+        out: PathBuf,
+        /// Additional pack directory to load (validated, schema-checked).
+        #[arg(long = "packs-dir")]
+        packs_dir: Option<PathBuf>,
+        /// Print the manifest as JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prove what a workload needs: stable baseline, enforced
+    /// interventions, causal classification, and a replay-verified world.
+    Prove {
+        /// Repository locator: local path or git URL.
+        locator: String,
+        #[arg(long = "ref")]
+        reference: Option<String>,
+        /// Workload to prove: build|test|start (discovered), or a name
+        /// for an explicit command passed after `--`.
+        #[arg(long, default_value = "test")]
+        workload: String,
+        /// Explicit workload command (overrides discovery).
+        #[arg(last = true)]
+        argv: Vec<String>,
+        /// Bundle directory (default: .ovid/runs/<analysis-id>).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Execution backend: `process` (host; trusted repos) or
+        /// `microsandbox` (libkrun guest VM).
+        #[arg(long, default_value = "process")]
+        backend: String,
+        /// Guest image for the microsandbox backend.
+        #[arg(long = "guest-image", default_value = "ubuntu")]
+        guest_image: String,
+        /// Explicitly accept host-process execution for a remote
+        /// repository you trust (otherwise remote sources require the
+        /// guest-VM backend).
+        #[arg(long = "trusted-process")]
+        trusted_process: bool,
+        /// Baseline repetitions from the frozen snapshot.
+        #[arg(long = "baseline-runs", default_value_t = 2)]
+        baseline_runs: usize,
+        /// Confirmation runs per intervention.
+        #[arg(long = "confirmation-runs", default_value_t = 1)]
+        confirmation_runs: usize,
+        /// Hard ceiling on trials.
+        #[arg(long = "max-trials", default_value_t = 12)]
+        max_trials: usize,
+        /// Per-trial wall-clock timeout in seconds.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Extra host environment variable names to pass through
+        /// (repeatable; names only, values come from the host).
+        #[arg(long = "inherit-env")]
+        inherit_env: Vec<String>,
+        /// Skip the clean-replay verification step.
+        #[arg(long = "no-replay")]
+        no_replay: bool,
+        #[arg(long = "packs-dir")]
+        packs_dir: Option<PathBuf>,
+        /// Print the proof report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-verify a proved bundle: rebuild the environment, rerun the
+    /// locked workload from clean state, update the lock status.
+    Replay {
+        /// Analysis bundle directory (from `ovid prove`).
+        bundle: PathBuf,
+        #[arg(long, default_value = "process")]
+        backend: String,
+        #[arg(long = "guest-image", default_value = "ubuntu")]
+        guest_image: String,
+        #[arg(long = "inherit-env")]
+        inherit_env: Vec<String>,
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+    },
+    /// Report host capabilities (observation, isolation, backends) with
+    /// exact remediation steps.
+    Doctor,
+    /// Non-executing static inventory (legacy name; prefer `inspect`).
     Inventory {
         /// Repository locator: local path or git URL.
         locator: String,
@@ -213,6 +307,66 @@ enum PacksCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Inspect {
+            locator,
+            reference,
+            out,
+            packs_dir,
+            json,
+        } => prove_cmd::run_inspect(&locator, reference, &out, packs_dir.as_deref(), json),
+        Command::Prove {
+            locator,
+            reference,
+            workload,
+            argv,
+            out,
+            backend,
+            guest_image,
+            trusted_process,
+            baseline_runs,
+            confirmation_runs,
+            max_trials,
+            timeout,
+            inherit_env,
+            no_replay,
+            packs_dir,
+            json,
+        } => {
+            let options = prove_cmd::ProveOptions {
+                workload,
+                argv: if argv.is_empty() { None } else { Some(argv) },
+                backend: pipeline::BackendKind::parse(&backend)?,
+                guest_image,
+                trusted_process,
+                baseline_runs,
+                confirmation_runs,
+                max_trials,
+                timeout_seconds: timeout,
+                extra_env: inherit_env,
+                no_replay,
+                packs_dir,
+                json,
+            };
+            let code = prove_cmd::run_prove(&locator, reference, out, &options)?;
+            std::process::exit(code);
+        }
+        Command::Replay {
+            bundle,
+            backend,
+            guest_image,
+            inherit_env,
+            timeout,
+        } => {
+            let code = prove_cmd::run_replay(
+                &bundle,
+                pipeline::BackendKind::parse(&backend)?,
+                &guest_image,
+                &inherit_env,
+                timeout,
+            )?;
+            std::process::exit(code);
+        }
+        Command::Doctor => prove_cmd::run_doctor(),
         Command::Inventory {
             locator,
             reference,

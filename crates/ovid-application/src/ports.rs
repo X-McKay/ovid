@@ -188,6 +188,9 @@ pub enum JournalEvent {
         record: TrialRecord,
         exit_code: Option<i32>,
         duration_ms: u64,
+        /// Bounded output tail — the diagnostics bundle keeps enough to
+        /// debug a failed trial without shipping full logs (§16.3).
+        output_tail: String,
     },
     BaselineClassified {
         verdict: BaselineVerdict,

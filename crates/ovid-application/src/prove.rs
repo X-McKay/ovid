@@ -95,6 +95,8 @@ pub struct StageTiming {
 #[derive(Clone, Serialize, Debug)]
 pub struct ProveReport {
     pub scope: AnalysisScope,
+    /// The provisioning command, preserved so `replay` can re-provision.
+    pub provision_argv: Option<Vec<String>>,
     pub provision: Option<TrialRecord>,
     pub baseline: BaselineVerdict,
     pub trials: Vec<TrialRecord>,
@@ -224,7 +226,14 @@ pub fn prove(
             record: result.record.clone(),
             exit_code: result.exit_code,
             duration_ms: result.duration_ms,
+            output_tail: result.output_tail.clone(),
         })?;
+        if let Some(signature) = &result.record.outcome.failure_signature {
+            progress.emit(
+                "trial",
+                &format!("{} failed ({signature})", result.record.label),
+            );
+        }
         trials.push(result.record.clone());
         Ok(Some(result))
     };
@@ -462,6 +471,7 @@ pub fn prove(
 
     Ok(ProveReport {
         scope,
+        provision_argv: request.provision_argv.clone(),
         provision,
         baseline,
         trials,
