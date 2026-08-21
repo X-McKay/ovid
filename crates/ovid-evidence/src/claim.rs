@@ -111,10 +111,8 @@ impl ClaimStore {
     pub fn query(&self, predicate: Option<&str>, term: Option<&str>) -> Vec<&Claim> {
         self.claims
             .values()
-            .filter(|c| predicate.map_or(true, |p| c.predicate == p))
-            .filter(|c| {
-                term.map_or(true, |t| c.subject.contains(t) || c.object.contains(t))
-            })
+            .filter(|c| predicate.is_none_or(|p| c.predicate == p))
+            .filter(|c| term.is_none_or(|t| c.subject.contains(t) || c.object.contains(t)))
             .collect()
     }
 

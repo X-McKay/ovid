@@ -1,6 +1,6 @@
 [package]
 name = "ovid-gateway"
-description = "placeholder"
+description = "Chameleon Gateway control plane: egress policy, DNS decisions, protocol classification, fault injection"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,6 @@ repository.workspace = true
 
 [dependencies]
 ovid-core.workspace = true
+ovid-packs.workspace = true
+serde.workspace = true
+serde_json.workspace = true

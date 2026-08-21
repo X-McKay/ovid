@@ -109,8 +109,8 @@ impl RepoSnapshot {
                 metadata.len()
             )));
         }
-        Ok(std::fs::read_to_string(&path)
-            .map_err(|e| OvidError::Repository(format!("read {relative}: {e}")))?)
+        std::fs::read_to_string(&path)
+            .map_err(|e| OvidError::Repository(format!("read {relative}: {e}")))
     }
 }
 

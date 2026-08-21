@@ -179,7 +179,7 @@ impl PackRegistry {
                 (false, true) => 1,
                 (false, false) => continue,
             };
-            if best.map_or(true, |(s, _, _)| score > s) {
+            if best.is_none_or(|(s, _, _)| score > s) {
                 best = Some((score, pack, protocol));
             }
         }

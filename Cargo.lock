@@ -330,6 +330,9 @@ name = "ovid-gateway"
 version = "0.1.0"
 dependencies = [
  "ovid-core",
+ "ovid-packs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -350,7 +353,12 @@ dependencies = [
 name = "ovid-observer"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ovid-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -377,6 +385,13 @@ name = "ovid-planner"
 version = "0.1.0"
 dependencies = [
  "ovid-core",
+ "ovid-packs",
+ "ovid-repository",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]
@@ -395,7 +410,12 @@ dependencies = [
 name = "ovid-sandbox"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "ovid-core",
+ "ovid-observer",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

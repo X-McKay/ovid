@@ -22,7 +22,7 @@ pub mod trust;
 
 pub use digest::Digest;
 pub use error::OvidError;
-pub use event::{BoundaryEvent, EventEnvelope, EventKind};
+pub use event::{BoundaryEvent, EventEnvelope, EventKind, ProcessIdentity};
 pub use id::{IdGenerator, OvidId};
 pub use states::{CausalClassification, ClaimState, ClaimStates};
 pub use trust::TrustTier;
