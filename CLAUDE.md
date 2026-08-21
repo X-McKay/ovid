@@ -57,16 +57,45 @@ These come from the spec and are load-bearing; tests enforce most of them:
    code paths must not copy host environment or credentials into
    ledgers, manifests, logs, or world locks (generated secrets are
    referenced, never stored).
+10. **Only the domain classifier mints causal labels** (proposal §7.5;
+    docs/ovid_improvement_proposal.md). `ovid_domain::CausalConclusion`
+    has no public constructor — never add one, never bypass
+    `classify_intervention`. Its gates are load-bearing: stable passing
+    baseline, `Enforced` treatment, consistent variant outcomes, and
+    single-dependency variation for `required`.
+11. **Enforcement is evidence; experiments are never weakened**
+    (proposal §7.6, ADR-014). A laboratory refuses treatments it cannot
+    enforce (`LabError::Unsupported`); the use case classifies affected
+    candidates `unresolved`. Never downgrade a treatment (e.g. proxy-var
+    stripping instead of a network namespace) on the prove path.
+12. **Verified worlds come only from clean replay** (proposal §7.7,
+    ADR-015). `VerifiedWorld` is constructible only via
+    `ReplayEvidence::from_clean_replay` on a passing untreated trial;
+    writers project `WorldStatus`, they never promote it.
+13. **Remote sources never execute on the host process by default**
+    (proposal §15.2, ADR-011). The `--trusted-process` gate in
+    `ovid prove` fires before acquisition; keep it that way for any new
+    executing command.
+14. **Baseline and variants fork from one immutable snapshot**
+    (proposal §10.8, ADR-013). Laboratory adapters must give every trial
+    a pristine fork of the frozen post-provision snapshot — full
+    fidelity, including caches provisioning installed — and destroy the
+    overlay after the result is persisted.
 
 ## Code conventions
 
 - Rust 2021, MSRV in `Cargo.toml` (`rust-version`). All deps are declared
   in `[workspace.dependencies]` and inherited with `.workspace = true`.
 - Crate layering (no cycles):
-  `core -> {evidence, repository} -> {inventory, packs} ->
+  `core -> {domain, evidence, repository} -> {application, inventory, packs} ->
   {planner, observer, sandbox, gateway} -> {experiment, world, output} -> cli`.
   New crates slot into this order; the CLI is the only place that wires
-  everything together.
+  everything together. Two extra rules from the 0.2 architecture
+  (proposal §5.1): `ovid-domain` stays pure (no I/O, no process, no
+  filesystem dependencies), and `ovid-application` may depend on the
+  domain but on **no concrete adapter** — new integrations go behind its
+  ports and are wired in `ovid-cli` (adapters live as CLI modules until
+  extraction is justified). `ovid-testkit` is dev-dependency-only.
 - Every public item gets a doc comment; module docs cite the spec section
   they implement (e.g. `(spec §17.2, FR-043)`). Keep that traceability —
   it is how reviewers check behavior against the spec.
@@ -97,6 +126,13 @@ These come from the spec and are load-bearing; tests enforce most of them:
 - New pack kinds/fields require: schema validation tests in
   `ovid-packs`, at least one builtin pack exercising them, and a
   registry test.
+- Prove-loop behavior is tested twice: truth scenarios against the
+  scripted `ovid_testkit::FixtureLaboratory`
+  (`crates/ovid-application/tests/truth.rs` — known ground truth, zero
+  real execution) and end-to-end through the real process laboratory
+  (`crates/ovid-cli/tests/prove.rs` + `fixtures/prove-truth`). A change
+  to classification or enforcement rules needs a truth scenario, not
+  just a unit test.
 
 ## Skills
 

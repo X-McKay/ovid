@@ -1,28 +1,108 @@
 # Ovid architecture
 
 This document describes the implemented system and how it maps to the
-Ovid technical specification ("spec §" references). Module docs in each
-crate carry the fine-grained traceability; this is the map.
+Ovid technical specification ("spec §" references) and, for the 0.2
+direction, to `docs/ovid_improvement_proposal.md` ("proposal §"
+references). Module docs in each crate carry the fine-grained
+traceability; this is the map.
 
 ## Crate graph
 
 ```text
 ovid-core        ids, digests, trust tiers (T0–T5), claim states, boundary events
+   ├── ovid-domain       PURE causal domain: scope, trials, enforcement, classifier,
+   │                     world verification type-states (0.2, proposal §5.2/§7)
+   │      └── ovid-application  use cases + outbound ports: prove/replay over a
+   │                            capability-based LaboratoryPort (0.2, proposal §5.1/§8/§9)
    ├── ovid-evidence     hash-chained ledger, claims, confidence model
    ├── ovid-repository   acquisition, revision resolution, fingerprinting
    │      ├── ovid-inventory   language stats, ecosystem scanners, PURL, SBOM provider contract
    │      └── ovid-packs       pack schema + registry (runners/services/protocols/resolvers)
    ├── ovid-planner      command mining -> scored action graph
    ├── ovid-observer     BoundaryObserver contract + strace backend + aggregation
-   ├── ovid-sandbox      ExecutionBackend: process sandbox + Firecracker layer
+   ├── ovid-sandbox      ExecutionBackend: process sandbox + Firecracker + microsandbox
    ├── ovid-gateway      egress/DNS policy, virtual identities, fault policies, network analysis
    ├── ovid-experiment   success predicates, resolution proposals, MVW solver
    ├── ovid-world        worlds, world locks, Compose export
    ├── ovid-output       manifest, CycloneDX/SPDX, integration plan, diff
-   └── ovid-cli          the pipeline wiring everything together
+   ├── ovid-testkit      scripted FixtureLaboratory + RecordingJournal (test doubles)
+   └── ovid-cli          composition root: laboratory/journal adapters + both pipelines
 ```
 
 Layering is strict (no cycles); only the CLI composes all layers.
+`ovid-domain` has no I/O dependencies at all; `ovid-application` depends
+on the domain and on **no concrete adapter** — Git, strace,
+microsandbox, ledgers, and terminals reach it only through traits, wired
+together in `ovid-cli` (proposal §5.1). `ovid-testkit` is a
+dev-dependency-only crate providing the scripted laboratory the truth
+fixtures run against.
+
+## The 0.2 prove loop (proposal §9.2)
+
+Ovid 0.2 repositions the product around one differentiated loop, exposed
+as `ovid prove`:
+
+```text
+resolve source -> select workload (planner)
+-> prepare environment + provision (online, observed)
+-> freeze one immutable post-provision snapshot
+-> repeated baseline trials, each from a fresh fork of that snapshot
+-> baseline stability gate (unstable => no causal labels, ever)
+-> collect external candidates from boundary observation
+-> enforced deny-all-egress intervention (+ confirmation runs)
+-> domain classification: required / optional / unresolved
+-> synthesize world candidate -> clean replay -> VerifiedWorld or
+   preserved failure
+```
+
+Structural rules, enforced in code rather than by convention:
+
+- `CausalConclusion` has **no public constructor** (proposal §7.5): only
+  `ovid_domain::classify_intervention` can label a dependency
+  required/optional, and its rules (stable passing baseline, enforced
+  treatment, consistent variant outcomes, single-dependency variation
+  for `required`) are unit- and property-tested.
+- Every trial carries an `EnforcementReport` (proposal §7.6). A
+  laboratory that cannot enforce a treatment refuses it
+  (`LabError::Unsupported`); the use case then classifies the affected
+  candidates `unresolved` — the experiment is never silently weakened.
+- `VerifiedWorld` is reachable only through `ReplayEvidence`, which only
+  exists for a passing, untreated, clean-state replay (proposal §7.7).
+  Renderers project the status; they cannot promote it.
+- The typed journal (`JournalEvent`) is appended to the same
+  hash-chained ledger; `proof.json`, claims, and the terminal report are
+  projections of it (proposal §12).
+- The `prove` bundle is lean by design (proposal §14.10): `proof.json`,
+  `timings.json`, `evidence.jsonl`, `claims.json`, `world.lock.yaml`,
+  `compose.yaml`. Standards exports stay on the legacy commands (and a
+  future `ovid export`).
+
+### 0.2 architecture decisions (proposal §21)
+
+- **ADR-009** Ovid is a causal dependency verifier; SBOM breadth is
+  supporting evidence, not the product.
+- **ADR-010** Causal claims are scoped: repository revision + workload +
+  environment + policies + observer (`AnalysisScope`), never universal.
+- **ADR-011** Remote repositories do not execute on the host process by
+  default; `--trusted-process` is an explicit, recorded opt-in
+  (proposal §15.2).
+- **ADR-012** The application depends on a coarse `LaboratoryPort`
+  selected by *capabilities*, not backend enums (proposal §5.5).
+- **ADR-013** Every baseline and variant forks from the same immutable
+  post-provisioning snapshot (proposal §10.8).
+- **ADR-014** Treatment enforcement is explicit evidence; unenforced or
+  unenforceable treatments can only produce `unresolved`.
+- **ADR-015** World verification requires a clean replay; `verified` is
+  a type-state, not a field a writer can set.
+- **ADR-016** Ports are synchronous. The proposal sketches async traits;
+  the workspace is synchronous end to end, trials run one at a time in
+  0.2, and an async runtime would be an adapter concern leaking inward.
+  Revisit alongside bounded parallel trials (proposal §10.6).
+
+The legacy commands (`inventory`, `observe`, `analyze`, `tomography`)
+still run the original pipeline while the strangler migration
+(proposal §18) proceeds; `inspect` fronts `inventory`, and `prove`
+supersedes the `analyze`/`tomography` split on the new path.
 
 ## Evidence flow (ADR-004)
 

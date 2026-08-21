@@ -535,7 +535,7 @@ impl Manifest {
     }
 
     /// YAML with a file header and one banner comment per section — the
-    /// human-facing rendering. Content is byte-identical to [`to_yaml`]
+    /// human-facing rendering. Content is byte-identical to [`Manifest::to_yaml`]
     /// minus comments; parsers see the same document.
     pub fn to_yaml_annotated(&self) -> String {
         let blurb = |section: &str| -> Option<&'static str> {

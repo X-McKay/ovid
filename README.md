@@ -1,15 +1,24 @@
 # Ovid
 
-**Repository execution tomography: evidence-driven analysis of how a
-repository is built, executed, and integrated.**
+**A causal dependency verifier: Ovid experimentally determines what a
+repository workload needs, explains why, and verifies that the inferred
+environment can reproduce the workload.**
 
-Ovid takes a repository (local path or Git URL), inventories what it
-*declares*, executes its workloads under boundary observation to see what
-it *actually does*, and emits an evidence-backed manifest: components,
-required tools, external services, listeners, causal classifications, and
-a reproducible integration-world proposal. Every conclusion links back to
-immutable, hash-chained evidence — Ovid can always answer
+`ovid prove` runs a workload under controlled conditions — a stable
+baseline from an immutable snapshot, then enforced interventions
+(deny-all egress today; per-dependency treatments next) — and classifies
+every external dependency as **required**, **optional**, or honestly
+**unresolved**. It then synthesizes the smallest credible world and
+marks it **verified** only after a clean replay passes. Every conclusion
+is scoped (one revision, one workload, one environment, one policy) and
+links back to immutable, hash-chained evidence — Ovid can always answer
 *"why do you believe this?"*
+
+A claim reads as *"postgres:5432 was required for `test` at revision
+`abc123`, under environment `env:…`: the stable baseline passed, the
+enforced no-egress treatment failed 2/2, and the generated world
+replayed successfully"* — never as *"this repository always requires
+PostgreSQL"*.
 
 ## Purpose
 
@@ -31,6 +40,29 @@ is required or optional. Ovid closes that gap with a hybrid model:
   guessing.
 
 ## Features
+
+The 0.2 surface (primary):
+
+- `ovid inspect` — fast, static-only inspection: composition, declared
+  endpoints, and ranked workload candidates. Never executes repository
+  code.
+- `ovid prove` — the primary loop: provision, freeze an immutable
+  snapshot, repeated baseline (a flaky workload never receives causal
+  labels), enforced deny-all-egress intervention with confirmation,
+  required/optional/unresolved classification, world synthesis, and
+  clean-replay verification. Writes `proof.json` + typed journal
+  evidence; stable exit codes (0 completed, 20 baseline/replay failed).
+- `ovid replay` — rebuild the environment from a proved bundle, rerun
+  the locked workload from clean state, and update the lock's
+  verification status from the outcome.
+- `ovid doctor` — host capability report (observation, isolation,
+  backends) with exact remediation, before a failed run makes you
+  discover the gaps.
+- Safety default: a **remote** repository never executes on the host
+  process — use the microsandbox guest VM, or opt in explicitly with
+  `--trusted-process`.
+
+The evidence machinery beneath (also exposed via the legacy commands):
 
 - `ovid inventory` — non-executing static inventory with language stats,
   merged declared+resolved components, PURL normalization.
@@ -155,27 +187,49 @@ clone first and run `scripts/install.sh` from the checkout with
 ### Run
 
 ```sh
-# Static inventory of a repository
-ovid inventory https://github.com/sharkdp/fd --ref master
+# Check what this host can do (observation, isolation, backends)
+ovid doctor
 
-# Observe an explicit command (trusted repo, ephemeral workspace)
-ovid observe . --run 'cargo test' --inherit-env PATH --inherit-env HOME
+# Static look first: composition + ranked workload candidates
+ovid inspect .
 
-# Full local analysis: discover workloads, observe, synthesize a world
-ovid analyze . --workloads build,test --inherit-env PATH --inherit-env HOME
+# Prove what the test workload needs (the primary loop)
+ovid prove . --workload test
 
-# Offline/online counterfactual pair with one bundle (network causality)
-ovid tomography . --workloads test --inherit-env PATH --inherit-env HOME
+# ... or prove an explicit command
+ovid prove . --workload test -- make integration-test
+
+# Prove a remote repository (guest VM; or add --trusted-process)
+ovid prove https://github.com/org/repo --backend microsandbox
+
+# Re-verify the generated world from clean state
+ovid replay .ovid/runs/<id>
 
 # Why do you believe this?
-ovid explain claim:01J... --from ovid-output
-ovid explain postgres --from ovid-output          # substring search
+ovid explain postgres --from .ovid/runs/<id>
 
 # Compare two revisions' bundles
 ovid diff --before out-v1/ --after out-v2/
 ```
 
-Every analysis writes a bundle:
+The legacy commands (`inventory`, `observe`, `analyze`, `tomography`)
+remain available while the 0.2 migration completes; `tomography` is
+still the way to get the full manifest + standards exports in one run.
+
+`ovid prove` writes a lean bundle to `.ovid/runs/<analysis-id>` (and
+records it in `.ovid/latest`):
+
+```text
+.ovid/runs/<id>/
+├── proof.json                # scope, baseline, trials, conclusions, world status
+├── evidence.jsonl            # hash-chained ledger of typed journal events
+├── claims.json               # requires / optionally-uses claims with evidence links
+├── world.lock.yaml           # world lock; status verified only after clean replay
+├── compose.yaml              # local replay environment
+└── timings.json              # per-stage wall-clock + trial count
+```
+
+Legacy analyses write the full bundle:
 
 ```text
 ovid-output/

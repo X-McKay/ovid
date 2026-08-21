@@ -20,9 +20,11 @@ use std::path::PathBuf;
 #[command(
     name = "ovid",
     version,
-    about = "Evidence-driven repository execution tomography",
-    long_about = "Ovid analyzes how a repository is built, executed, and integrated by \
-                  observing real execution boundaries and recording evidence-backed claims."
+    about = "Evidence-backed causal dependency verifier",
+    long_about = "Ovid experimentally determines what a repository workload needs, explains \
+                  why, and verifies that the inferred environment can reproduce the workload. \
+                  Start with `ovid doctor`, then `ovid inspect <repo>`, then \
+                  `ovid prove <repo> --workload test`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -63,7 +65,7 @@ enum Command {
         /// Explicit workload command (overrides discovery).
         #[arg(last = true)]
         argv: Vec<String>,
-        /// Bundle directory (default: .ovid/runs/<analysis-id>).
+        /// Bundle directory (default: `.ovid/runs/<analysis-id>`).
         #[arg(long)]
         out: Option<PathBuf>,
         /// Execution backend: `process` (host; trusted repos) or
