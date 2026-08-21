@@ -189,6 +189,8 @@ accuracy measurements) is documented in
 | Workload needs network (dependency download) but hangs/fails | The sandbox does not provide a registry proxy in process mode; run the dependency-fetch step yourself first, or use `--in-place` against a pre-fetched checkout. |
 | `git clone failed` for a URL | Check the ref (`--ref`), network access, and credentials; Ovid clones with hooks disabled and never runs repo code during acquisition. |
 | `UnsupportedHost: /dev/kvm not present` | You asked for the Firecracker backend on a host without KVM. Use the process backend (default) for trusted repos, or provision a Linux/KVM worker. |
+| `tomography` offline run warns about missing isolation | `unshare -r -n` (unprivileged user namespaces) is unavailable — often disabled via `kernel.unprivileged_userns_clone=0` or distro hardening. The offline run falls back to stripping proxy variables and says so in limitations. |
+| External systems show `identity: ip-only` | No DNS resolution was observed for those destinations (e.g. the address was hardcoded, or resolution happened before observation started). The manifest lists how many, so absence of a name reads as unknown, not nameless. |
 | Analysis is slow on a huge repository | Use `--in-place` to skip the ephemeral copy (trusted checkouts only), and prefer `inventory` mode for fleet-style sweeps. |
 | Golden test failure after your change | Expected if output changed intentionally — regenerate with `UPDATE_GOLDENS=1` and commit the diff; otherwise you introduced a regression. |
 | `pack validation failed` | Packs must have `api_version: ovid.dev/pack/v1` and digest-pinned service images. Run `ovid packs validate <dir>` for the exact error. |
