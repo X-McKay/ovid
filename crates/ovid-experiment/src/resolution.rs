@@ -66,6 +66,26 @@ fn ignorable_missing_file(path: &str) -> bool {
         || path.starts_with("/usr/share/")
 }
 
+/// Whether the run's own evidence shows this tool was found: a successful
+/// exec of the basename anywhere, or the terminating hit of a PATH scan —
+/// a successful stat of the basename inside a `bin`/`sbin` directory (the
+/// observer records exactly those hits). Without this, a `command -v`
+/// style probe that finds its tool is indistinguishable from one that
+/// does not, and resolution would propose installing a tool that exists.
+fn tool_found_in_run(events: &[EventEnvelope], basename: &str) -> bool {
+    events.iter().any(|envelope| match &envelope.event {
+        BoundaryEvent::ProcessExec {
+            path, errno: None, ..
+        } => path.rsplit('/').next() == Some(basename),
+        BoundaryEvent::FileOpened {
+            path, errno: None, ..
+        } => path.rsplit_once('/').is_some_and(|(dir, base)| {
+            base == basename && (dir.ends_with("/bin") || dir.ends_with("/sbin"))
+        }),
+        _ => false,
+    })
+}
+
 /// Derive ranked proposals from run evidence and network analysis.
 pub fn propose_resolutions(
     events: &[EventEnvelope],
@@ -90,14 +110,7 @@ pub fn propose_resolutions(
                 if seen_tools.contains(&basename) {
                     continue;
                 }
-                let succeeded_elsewhere = events.iter().any(|other| {
-                    matches!(
-                        &other.event,
-                        BoundaryEvent::ProcessExec { path: p, errno: None, .. }
-                            if p.rsplit('/').next() == Some(basename.as_str())
-                    )
-                });
-                if succeeded_elsewhere {
+                if tool_found_in_run(events, &basename) {
                     continue;
                 }
                 seen_tools.insert(basename.clone());
@@ -177,14 +190,7 @@ pub fn propose_resolutions(
         if dirs.len() < 2 || seen_tools.contains(basename) {
             continue;
         }
-        let succeeded = events.iter().any(|other| {
-            matches!(
-                &other.event,
-                BoundaryEvent::ProcessExec { path: p, errno: None, .. }
-                    if p.rsplit('/').next() == Some(basename.as_str())
-            )
-        });
-        if succeeded {
+        if tool_found_in_run(events, basename) {
             continue;
         }
         if let Some(candidate) = registry.resolve_executable(basename).first() {
@@ -363,6 +369,46 @@ mod tests {
                 if executable == "protoc" && package == "protobuf-compiler"
         ));
         assert_eq!(proposals[0].evidence.len(), 3);
+    }
+
+    #[test]
+    fn path_scan_ending_in_stat_hit_is_not_missing() {
+        let ids = IdGenerator::deterministic();
+        let registry = PackRegistry::builtin().unwrap();
+        // `command -v protoc`: misses in two dirs, then the terminating
+        // stat hit — the tool exists and was never exec'd (probe only).
+        let events = vec![
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/usr/local/sbin/protoc".into(),
+                    errno: Some("ENOENT".into()),
+                    write: false,
+                },
+            ),
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/usr/local/bin/protoc".into(),
+                    errno: Some("ENOENT".into()),
+                    write: false,
+                },
+            ),
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/usr/bin/protoc".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+        ];
+        let network = analyze_network(&events, &registry, &BTreeMap::new());
+        let proposals = propose_resolutions(&events, &network, &registry);
+        assert!(
+            proposals.is_empty(),
+            "a scan that found its tool must not propose installing it: {proposals:?}"
+        );
     }
 
     #[test]

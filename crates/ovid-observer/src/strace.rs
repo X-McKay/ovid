@@ -121,6 +121,18 @@ fn push_event(
     });
 }
 
+/// Whether a successful stat looks like an executable PATH probe: an
+/// extensionless basename inside a `bin`/`sbin` directory. Bounds the
+/// volume of successful-stat events to tool lookups.
+fn is_executable_probe(path: &str) -> bool {
+    let Some((dir, base)) = path.rsplit_once('/') else {
+        return false;
+    };
+    !base.is_empty()
+        && !base.contains('.')
+        && (dir == "/bin" || dir == "/sbin" || dir.ends_with("/bin") || dir.ends_with("/sbin"))
+}
+
 enum LineOutcome {
     Event(u32, BoundaryEvent),
     /// One line can yield several events (a DNS response carries multiple
@@ -154,6 +166,10 @@ fn regexes() -> &'static Regexes {
         execve: re(r#"^execve(?:at)?\((?:[^,]*,\s*)?"([^"]+)",\s*\[(.*?)\][^=]*=\s*(-?\d+)(?:\s+(\w+))?"#),
         open: re(r#"^(?:openat|open|creat)\((?:AT_FDCWD,\s*|[-\d]+(?:<[^>]*>)?,\s*)?"([^"]+)"(?:,\s*([A-Z_|]+))?[^=]*=\s*(-?\d+)(?:\s+(\w+))?"#),
         stat_miss: re(r#"^(?:newfstatat|statx|access|faccessat2?|faccessat)\((?:AT_FDCWD,\s*|[-\d]+(?:<[^>]*>)?,\s*)?"([^"]+)"[^=]*=\s*-\d+\s+(\w+)"#),
+        // Success lines print the stat struct, which itself contains `=`
+        // (`{st_mode=…}`), so the tail is matched greedily and the zero
+        // result is end-anchored.
+        stat_hit: re(r#"^(?:newfstatat|statx|access|faccessat2?|faccessat)\((?:AT_FDCWD,\s*|[-\d]+(?:<[^>]*>)?,\s*)?"([^"]+)".*=\s*0\s*$"#),
         inet: re(r#"sin6?_port=htons\((\d+)\)"#),
         inet_addr: re(r#"inet_addr\("([^"]+)"\)|inet_pton\([^,]+,\s*"([^"]+)""#),
         unix_path: re(r#"sun_path="([^"]+)""#),
@@ -169,6 +185,7 @@ struct Regexes {
     execve: Regex,
     open: Regex,
     stat_miss: Regex,
+    stat_hit: Regex,
     inet: Regex,
     inet_addr: Regex,
     unix_path: Regex,
@@ -269,8 +286,12 @@ impl Parser {
         }
 
         // stat/access failures: PATH-scan misses and probed-but-absent
-        // files. Successful stats are deliberately not events (volume);
-        // failures are first-class (§6.2).
+        // files. Failures are first-class (§6.2). Successful stats are
+        // mostly not events (volume) — except executable probes in
+        // bin-like directories, which are the *terminating hit* of a
+        // shell/make PATH scan: without them a found tool is
+        // indistinguishable from a missing one inside a single run, and
+        // resolution would propose installing a tool that exists.
         if let Some(caps) = r.stat_miss.captures(rest) {
             return LineOutcome::Event(
                 pid,
@@ -281,12 +302,25 @@ impl Parser {
                 },
             );
         }
+        if let Some(caps) = r.stat_hit.captures(rest) {
+            let path = caps[1].to_string();
+            if is_executable_probe(&path) {
+                return LineOutcome::Event(
+                    pid,
+                    BoundaryEvent::FileOpened {
+                        path,
+                        errno: None,
+                        write: false,
+                    },
+                );
+            }
+        }
         if rest.starts_with("newfstatat(")
             || rest.starts_with("statx(")
             || rest.starts_with("access(")
             || rest.starts_with("faccessat")
         {
-            return LineOutcome::Ignored; // successful stat/access
+            return LineOutcome::Ignored; // successful stat/access (non-probe)
         }
 
         if rest.starts_with("connect(") {
@@ -623,15 +657,28 @@ mod tests {
             "700   access(\"/usr/bin/protoc\", X_OK) = -1 ENOENT (No such file or directory)\n",
             "700   statx(AT_FDCWD, \"/opt/bin/protoc\", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x7ffd) = -1 ENOENT (No such file or directory)\n",
             "700   newfstatat(AT_FDCWD, \"/usr/bin/make\", {st_mode=S_IFREG|0755, st_size=1}, 0) = 0\n",
+            "700   newfstatat(AT_FDCWD, \"/etc/ld.so.cache\", {st_mode=S_IFREG|0644, st_size=1}, 0) = 0\n",
+            "700   statx(AT_FDCWD, \"/repo/src/config.yaml\", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x7ffd) = 0\n",
         ));
-        // Three misses captured; the successful stat is ignored.
-        assert_eq!(report.events.len(), 3);
-        for envelope in &report.events {
-            assert!(matches!(
-                &envelope.event,
-                BoundaryEvent::FileOpened { errno: Some(err), .. } if err == "ENOENT"
-            ));
-        }
+        // Three misses captured, plus the scan's terminating hit
+        // (/usr/bin/make): a found tool must be distinguishable from a
+        // missing one. Non-probe successful stats stay ignored.
+        assert_eq!(report.events.len(), 4, "{:?}", report.events);
+        let misses = report
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.event,
+                    BoundaryEvent::FileOpened { errno: Some(err), .. } if err == "ENOENT"
+                )
+            })
+            .count();
+        assert_eq!(misses, 3);
+        assert!(report.events.iter().any(|e| matches!(
+            &e.event,
+            BoundaryEvent::FileOpened { path, errno: None, .. } if path == "/usr/bin/make"
+        )));
         assert_eq!(report.unparsed_lines, 0);
     }
 

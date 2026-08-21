@@ -1378,6 +1378,12 @@ const ONLINE_DEFAULT_ENV: &[&str] = &[
     "REQUESTS_CA_BUNDLE",
     "GIT_SSL_CAINFO",
     "CARGO_HTTP_CAINFO",
+    // JVM tooling reads proxy/truststore settings from its own variables,
+    // not the shell proxy vars — without these, Maven/Gradle cannot reach
+    // repositories in proxied environments.
+    "JAVA_TOOL_OPTIONS",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
 ];
 /// Offline legs only need toolchain discovery; the namespace blocks egress.
 const OFFLINE_DEFAULT_ENV: &[&str] = &["PATH", "HOME"];
