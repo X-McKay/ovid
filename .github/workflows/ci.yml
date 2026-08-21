@@ -1,0 +1,79 @@
+# Ovid CI: formatting, lints, unit + integration + golden regression tests,
+# pack validation, and performance guardrails.
+#
+# The test job installs strace because the boundary-observation integration
+# tests exercise the real ptrace observer. Perf guardrails run in their own
+# job so a noisy runner never blocks correctness feedback.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: Format and lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Unit, integration, and golden tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install strace (boundary observer backend)
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Unit and integration tests
+        run: cargo test --workspace
+      - name: Golden regression tests (explicit)
+        run: cargo test -p ovid-cli --test golden
+
+  packs:
+    name: Pack schema validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate on-disk pack tree
+        run: cargo run -p ovid-cli -- packs validate packs
+
+  perf:
+    name: Performance guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install strace
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Perf tests (thresholds are order-of-magnitude guards)
+        run: cargo test -p ovid-cli --test perf -- --ignored --nocapture
+
+  docs:
+    name: Documentation build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: rustdoc (deny warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps

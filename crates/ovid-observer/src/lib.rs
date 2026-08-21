@@ -12,7 +12,7 @@
 //!
 //! Modules:
 //! - [`strace`] — command wrapping and strace output parsing.
-//! - [`aggregate`] — event reduction (§32.5): collapse repeated successful
+//! - [`mod@aggregate`] — event reduction (§32.5): collapse repeated successful
 //!   opens, always preserve first occurrences and every failure.
 
 pub mod aggregate;
