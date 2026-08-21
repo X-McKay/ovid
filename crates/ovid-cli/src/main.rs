@@ -154,6 +154,30 @@ enum Command {
         #[command(subcommand)]
         command: PacksCommand,
     },
+    /// Internal: the laboratory gateway subprocess started inside an
+    /// isolated trial namespace. Not part of the public surface.
+    #[command(hide = true, name = "internal-gateway")]
+    InternalGateway {
+        /// Bind address, e.g. `127.0.0.1:3128`.
+        #[arg(long)]
+        listen: String,
+        /// `deny` (record + refuse) or `forward` (record + tunnel).
+        #[arg(long)]
+        policy: String,
+        /// Destinations to refuse under a forward policy (repeatable;
+        /// `host:port` or bare `host`).
+        #[arg(long)]
+        block: Vec<String>,
+        /// Upstream proxy URL to chain through when forwarding.
+        #[arg(long)]
+        upstream: Option<String>,
+        /// Intent log (JSONL) path.
+        #[arg(long)]
+        log: PathBuf,
+        /// File created once the socket is bound.
+        #[arg(long)]
+        ready: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -288,5 +312,30 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Command::InternalGateway {
+            listen,
+            policy,
+            block,
+            upstream,
+            log,
+            ready,
+        } => {
+            let policy = match policy.as_str() {
+                "deny" => ovid_gateway::GatewayPolicy::Deny,
+                "forward" if block.is_empty() => ovid_gateway::GatewayPolicy::Forward,
+                "forward" => {
+                    ovid_gateway::GatewayPolicy::ForwardExcept(block.into_iter().collect())
+                }
+                other => anyhow::bail!("unknown gateway policy {other:?}"),
+            };
+            let upstream = match upstream {
+                Some(url) => Some(ovid_gateway::Upstream::parse(&url).ok_or_else(|| {
+                    anyhow::anyhow!("invalid upstream proxy URL (expected http://host:port)")
+                })?),
+                None => None,
+            };
+            ovid_gateway::serve_blocking(&listen, policy, upstream, &log, ready.as_deref())?;
+            Ok(())
+        }
     }
 }

@@ -9,5 +9,9 @@
 //! laboratories (namespace isolation, guest `--no-net`), never here.
 
 pub mod analysis;
+pub mod proxy;
 
 pub use analysis::{analyze_network, ExternalObservation, Listener, NetworkAnalysis};
+pub use proxy::{
+    read_intents, serve_blocking, GatewayIntent, GatewayPolicy, GatewayServer, Upstream,
+};
