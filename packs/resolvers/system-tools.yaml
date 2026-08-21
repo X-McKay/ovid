@@ -1,0 +1,66 @@
+# Tool resolver pack (spec §15.3): which trusted artifact can provide a
+# missing executable or file. Candidates are proposals — Ovid installs the
+# candidate in a derived world and confirms progress by rerunning; only the
+# rerun promotes the requirement to a confirmed fact.
+api_version: ovid.dev/pack/v1
+kind: tool-resolver-pack
+metadata:
+  name: system-tools
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+executables:
+  protoc:
+    - { provider: apt-mirror, package: protobuf-compiler, confidence: 0.99 }
+    - { provider: nix-cache, package: "nixpkgs#protobuf", confidence: 0.95 }
+  cc:
+    - { provider: apt-mirror, package: gcc, confidence: 0.98 }
+  gcc:
+    - { provider: apt-mirror, package: gcc, confidence: 0.99 }
+  "g++":
+    - { provider: apt-mirror, package: g++, confidence: 0.99 }
+  make:
+    - { provider: apt-mirror, package: make, confidence: 0.99 }
+  cmake:
+    - { provider: apt-mirror, package: cmake, confidence: 0.99 }
+  pkg-config:
+    - { provider: apt-mirror, package: pkg-config, confidence: 0.99 }
+  git:
+    - { provider: apt-mirror, package: git, confidence: 0.99 }
+  curl:
+    - { provider: apt-mirror, package: curl, confidence: 0.99 }
+  unzip:
+    - { provider: apt-mirror, package: unzip, confidence: 0.99 }
+  jq:
+    - { provider: apt-mirror, package: jq, confidence: 0.99 }
+  python3:
+    - { provider: apt-mirror, package: python3, confidence: 0.99 }
+  pip3:
+    - { provider: apt-mirror, package: python3-pip, confidence: 0.98 }
+  node:
+    - { provider: apt-mirror, package: nodejs, confidence: 0.95 }
+  npm:
+    - { provider: apt-mirror, package: npm, confidence: 0.95 }
+  go:
+    - { provider: apt-mirror, package: golang-go, confidence: 0.95 }
+  cargo:
+    - { provider: rustup-mirror, package: rust-toolchain, confidence: 0.97 }
+  rustc:
+    - { provider: rustup-mirror, package: rust-toolchain, confidence: 0.97 }
+  java:
+    - { provider: apt-mirror, package: default-jre-headless, confidence: 0.9 }
+  mvn:
+    - { provider: apt-mirror, package: maven, confidence: 0.95 }
+  yarn:
+    - { provider: npm-mirror, package: yarn, confidence: 0.9 }
+files:
+  openssl/ssl.h:
+    - { provider: apt-mirror, package: libssl-dev, confidence: 0.98 }
+  zlib.h:
+    - { provider: apt-mirror, package: zlib1g-dev, confidence: 0.98 }
+  sqlite3.h:
+    - { provider: apt-mirror, package: libsqlite3-dev, confidence: 0.98 }
+  pg_config:
+    - { provider: apt-mirror, package: libpq-dev, confidence: 0.95 }
+  libpq-fe.h:
+    - { provider: apt-mirror, package: libpq-dev, confidence: 0.98 }

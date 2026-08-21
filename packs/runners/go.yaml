@@ -1,0 +1,18 @@
+# Runner recipe: Go modules.
+api_version: ovid.dev/pack/v1
+kind: runner-recipe
+metadata:
+  name: go
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+detect:
+  any_files: [go.mod]
+commands:
+  inventory:
+    - [go, list, -m, all]
+  build:
+    - [go, build, "./..."]
+  test:
+    - [go, test, "./..."]
+required_tools: [go]

@@ -1,0 +1,19 @@
+# Runner recipe: Rust / Cargo (spec §15.2).
+# The core does not know what Cargo.toml means beyond evaluating this recipe.
+api_version: ovid.dev/pack/v1
+kind: runner-recipe
+metadata:
+  name: rust
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+detect:
+  any_files: [Cargo.toml]
+commands:
+  inventory:
+    - [cargo, metadata, --format-version, "1", --no-deps]
+  build:
+    - [cargo, build, --locked, --workspace]
+  test:
+    - [cargo, test, --locked, --workspace]
+required_tools: [cargo, rustc]

@@ -1,0 +1,24 @@
+# Service pack: generic HTTP responder used as the base for adaptive stubs
+# (spec §18.4). Accepts any request and returns a neutral response; the
+# experiment loop mutates responses from clean snapshots.
+# See postgres.yaml for the digest-pinning note.
+api_version: ovid.dev/pack/v1
+kind: service-pack
+metadata:
+  name: generic-http
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+provides:
+  protocols: [http]
+  aliases: [http-stub]
+image:
+  reference: "registry.ovid.local/ovid/http-stub@sha256:9f2c7f8b1b4f5d2a8f0e1c6b3a9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d"
+  isolation: dedicated-microvm
+ports:
+  - name: http
+    container: 8080
+    protocol: tcp
+readiness:
+  tcp_port: 8080
+  timeout_seconds: 10

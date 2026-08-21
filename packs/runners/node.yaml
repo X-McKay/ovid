@@ -1,0 +1,19 @@
+# Runner recipe: Node.js / npm.
+api_version: ovid.dev/pack/v1
+kind: runner-recipe
+metadata:
+  name: node
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+detect:
+  any_files: [package.json]
+commands:
+  install:
+    - [npm, ci]
+    - [npm, install]
+  build:
+    - [npm, run, build, --if-present]
+  test:
+    - [npm, test]
+required_tools: [node, npm]

@@ -1,0 +1,29 @@
+# Service pack: disposable PostgreSQL (spec §15.5).
+# NOTE: the image digest below pins the schema-required format; deployments
+# must re-pin to the digest mirrored into their own registry (spec §12.1
+# requires digest-pinned, signature-verifiable images).
+api_version: ovid.dev/pack/v1
+kind: service-pack
+metadata:
+  name: postgres
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+provides:
+  protocols: [postgresql]
+  aliases: [postgres, postgresql, db, database]
+image:
+  reference: "docker.io/library/postgres@sha256:4ec37d360a292f4c7c8b0eb85a1f92be3b7d4bb0f4032ae9f88ac1fa2b2e0d17"
+  isolation: dedicated-microvm
+ports:
+  - name: postgres
+    container: 5432
+    protocol: tcp
+readiness:
+  command: [pg_isready, -U, ovid]
+  tcp_port: 5432
+  timeout_seconds: 30
+configuration:
+  POSTGRES_USER: ovid
+  POSTGRES_PASSWORD: generated-secret
+  POSTGRES_DB: ovid

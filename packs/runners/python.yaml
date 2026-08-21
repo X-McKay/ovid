@@ -1,0 +1,17 @@
+# Runner recipe: Python (pip/uv/poetry conventions).
+api_version: ovid.dev/pack/v1
+kind: runner-recipe
+metadata:
+  name: python
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+detect:
+  any_files: [pyproject.toml, requirements.txt, setup.py, setup.cfg]
+commands:
+  install:
+    - [python3, -m, pip, install, -e, "."]
+  test:
+    - [python3, -m, pytest, -x, -q]
+    - [python3, -m, unittest, discover]
+required_tools: [python3]

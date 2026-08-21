@@ -1,0 +1,88 @@
+# Protocol classifier packs (spec §15.4), one document per protocol.
+# Ports contribute weak evidence; first-byte signatures are stronger.
+# Port alone must carry very little weight in matching (spec §24.2).
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: postgresql, version: 1.0.0, signer: ovid-builtin }
+system: postgresql
+match:
+  ports: [5432]
+service_candidates: [postgres]
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: redis, version: 1.0.0, signer: ovid-builtin }
+system: redis
+match:
+  ports: [6379]
+  first_bytes_ascii_prefix_any: ["*", "+", "-", ":", "$"]
+service_candidates: [redis]
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: http, version: 1.0.0, signer: ovid-builtin }
+system: http
+match:
+  ports: [80, 8080, 8000, 3000, 5000]
+  first_bytes_ascii_prefix_any: ["GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "PATCH ", "OPTIONS "]
+  alpn_any: [http/1.1, h2c]
+service_candidates: [generic-http]
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: https, version: 1.0.0, signer: ovid-builtin }
+system: https
+match:
+  ports: [443, 8443]
+  alpn_any: [h2, http/1.1]
+service_candidates: [generic-http]
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: mysql, version: 1.0.0, signer: ovid-builtin }
+system: mysql
+match:
+  ports: [3306]
+service_candidates: []
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: kafka, version: 1.0.0, signer: ovid-builtin }
+system: kafka
+match:
+  ports: [9092, 9093]
+service_candidates: []
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: amqp, version: 1.0.0, signer: ovid-builtin }
+system: amqp
+match:
+  ports: [5672]
+  first_bytes_ascii_prefix_any: ["AMQP"]
+service_candidates: []
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: mongodb, version: 1.0.0, signer: ovid-builtin }
+system: mongodb
+match:
+  ports: [27017]
+service_candidates: []
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: smtp, version: 1.0.0, signer: ovid-builtin }
+system: smtp
+match:
+  ports: [25, 587, 2525]
+service_candidates: []
+---
+api_version: ovid.dev/pack/v1
+kind: protocol-pack
+metadata: { name: dns, version: 1.0.0, signer: ovid-builtin }
+system: dns
+match:
+  ports: [53]
+service_candidates: []

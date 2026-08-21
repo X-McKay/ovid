@@ -1,0 +1,17 @@
+# Runner recipe: generic Makefile projects (lowest-priority conventions).
+api_version: ovid.dev/pack/v1
+kind: runner-recipe
+metadata:
+  name: make
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+detect:
+  any_files: [Makefile, makefile, GNUmakefile]
+commands:
+  build:
+    - [make]
+  test:
+    - [make, test]
+    - [make, check]
+required_tools: [make]

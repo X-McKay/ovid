@@ -1,0 +1,23 @@
+# Service pack: disposable Redis/Valkey-compatible cache.
+# See postgres.yaml for the digest-pinning note.
+api_version: ovid.dev/pack/v1
+kind: service-pack
+metadata:
+  name: redis
+  version: 1.0.0
+  license: Apache-2.0
+  signer: ovid-builtin
+provides:
+  protocols: [redis]
+  aliases: [redis, valkey, cache]
+image:
+  reference: "docker.io/library/redis@sha256:e422889e156ebea83856b6ff973bfe0c86bce867d80def228044eeecf925592b"
+  isolation: dedicated-microvm
+ports:
+  - name: redis
+    container: 6379
+    protocol: tcp
+readiness:
+  command: [redis-cli, ping]
+  tcp_port: 6379
+  timeout_seconds: 15
