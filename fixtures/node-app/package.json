@@ -2,6 +2,6 @@
   "name": "node-app",
   "version": "1.0.0",
   "scripts": { "test": "node test.js", "build": "node build.js" },
-  "dependencies": { "express": "^4.19.0" },
+  "dependencies": { "express": "^4.22.0" },
   "devDependencies": { "@types/node": "^20.0.0" }
 }
