@@ -135,10 +135,72 @@ fn risk_penalty(command: &[String]) -> f64 {
     0.0
 }
 
-/// Classify a shell command into an action kind by its verbs.
+/// Shell builtins that cannot be executed as standalone programs; a mined
+/// line reduced to one of these is a fragment of a larger script, not a
+/// runnable candidate.
+fn is_shell_builtin(command: &[String]) -> bool {
+    matches!(
+        command.first().map(String::as_str),
+        Some("cd" | "export" | "source" | "set" | "unset" | "alias" | "exit" | "shift" | ".")
+    )
+}
+
+/// Whether the command invokes a genuine test runner (vs. a lint/style
+/// command that merely contains "check"). Used to rank real test suites
+/// above linters when scores from the mining source tie (FR-013).
+fn is_test_runner(joined: &str) -> bool {
+    const RUNNERS: &[&str] = &[
+        "pytest",
+        "unittest",
+        "cargo test",
+        "go test",
+        "npm test",
+        "yarn test",
+        "pnpm test",
+        "make test",
+        "jest",
+        "mocha",
+        "rspec",
+        "mvn test",
+        "gradle test",
+        "gradlew test",
+        "phpunit",
+        "ctest",
+    ];
+    RUNNERS.iter().any(|r| joined.contains(r))
+}
+
+/// Lint/format/static-check commands: legitimate Test-kind candidates,
+/// but weaker evidence of the repository's test suite than a runner.
+fn is_lint_command(joined: &str) -> bool {
+    const LINTERS: &[&str] = &[
+        "ruff",
+        "lint",
+        "clippy",
+        "fmt",
+        "shellcheck",
+        "shell-check",
+        "black ",
+        "prettier",
+        "eslint",
+        "flake8",
+        "mypy",
+        "isort",
+    ];
+    LINTERS.iter().any(|l| joined.contains(l))
+}
+
+/// Classify a shell command into an action kind by its verbs. Word-shaped
+/// tokens are matched as tokens where substrings mislead ("package" must
+/// not match a `packages/` path).
 fn classify(command: &[String]) -> ActionKind {
     let joined = command.join(" ");
     let has = |needle: &str| joined.contains(needle);
+    let has_token = |token: &str| {
+        joined
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .any(|word| word == token)
+    };
     if has("install")
         || has("npm ci")
         || has("pip install")
@@ -148,7 +210,7 @@ fn classify(command: &[String]) -> ActionKind {
         ActionKind::DependencyInstall
     } else if has("test") || has("pytest") || has("check") || has("spec") {
         ActionKind::Test
-    } else if has("build") || has("compile") || has("package") || has("assemble") {
+    } else if has("build") || has("compile") || has_token("package") || has("assemble") {
         ActionKind::Build
     } else if has("start") || has("run ") || has("serve") || has("server") {
         ActionKind::Start
@@ -173,15 +235,32 @@ pub fn plan(snapshot: &RepoSnapshot, registry: &PackRegistry) -> ActionGraph {
         if penalty >= 1.0 {
             return; // dangerous candidates are dropped, not just downranked
         }
+        if is_shell_builtin(&command) {
+            return; // unexecutable script fragment
+        }
         counter += 1;
         let kind = kind_hint.unwrap_or_else(|| classify(&command));
+        // Rank real test runners above lint/check commands that share the
+        // same mining source (FR-013: score by confidence, not just origin).
+        let joined = command.join(" ");
+        let kind_adjust = if kind == ActionKind::Test {
+            if is_test_runner(&joined) {
+                0.06
+            } else if is_lint_command(&joined) {
+                -0.06
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
         actions.push(Action {
             id: format!("action-{counter}"),
             kind,
             command,
             source,
             source_file,
-            score: (source.base_confidence() - penalty).max(0.0),
+            score: (source.base_confidence() + kind_adjust - penalty).max(0.0),
             prerequisites: Vec::new(),
         });
     };
@@ -329,6 +408,79 @@ mod tests {
         assert!(
             !test.prerequisites.is_empty(),
             "test should depend on install"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::*;
+    use ovid_repository::{acquire, AcquireOptions, RepositorySource};
+
+    fn snapshot_with_ci(run_lines: &str) -> RepoSnapshot {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::write(
+            dir.path().join(".github/workflows/ci.yml"),
+            format!("jobs:\n  ci:\n    steps:\n{run_lines}"),
+        )
+        .unwrap();
+        let snap = acquire(
+            &RepositorySource::parse(dir.path().to_str().unwrap(), None),
+            &AcquireOptions::new(dir.path().join(".work")),
+        )
+        .unwrap();
+        std::mem::forget(dir);
+        snap
+    }
+
+    #[test]
+    fn test_runners_outrank_lint_commands_from_the_same_source() {
+        // Lint commands mined BEFORE the runner: without ranking, mining
+        // order would win the tie (the cyberlab case).
+        let snapshot = snapshot_with_ci(concat!(
+            "      - run: make shell-check\n",
+            "      - run: uv run ruff check packages/\n",
+            "      - run: uv run pytest packages/ -q\n",
+        ));
+        let registry = PackRegistry::builtin().unwrap();
+        let graph = plan(&snapshot, &registry);
+        let best = graph.best(ActionKind::Test).unwrap();
+        assert!(
+            best.command.join(" ").contains("pytest"),
+            "test runner must outrank linters: {:?}",
+            graph.candidates(ActionKind::Test)
+        );
+    }
+
+    #[test]
+    fn shell_builtin_fragments_are_dropped() {
+        let snapshot = snapshot_with_ci(concat!(
+            "      - run: |\n",
+            "          cd packages/subdir\n",
+            "          export FOO=1\n",
+            "          cargo build\n",
+        ));
+        let registry = PackRegistry::builtin().unwrap();
+        let graph = plan(&snapshot, &registry);
+        for action in &graph.actions {
+            assert_ne!(action.command[0], "cd", "cd fragment must be dropped");
+            assert_ne!(action.command[0], "export");
+        }
+        assert!(graph.actions.iter().any(|a| a.command[0] == "cargo"));
+    }
+
+    #[test]
+    fn packages_path_is_not_a_build_verb() {
+        assert_eq!(
+            classify(&["ls".into(), "packages/cyberlab-gym".into()]),
+            ActionKind::Other,
+            "a packages/ path must not classify as Build"
+        );
+        assert_eq!(
+            classify(&["mvn".into(), "-B".into(), "package".into()]),
+            ActionKind::Build,
+            "the maven package goal still classifies as Build"
         );
     }
 }
