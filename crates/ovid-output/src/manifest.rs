@@ -542,6 +542,7 @@ impl Manifest {
             Some(match section {
                 "metadata" => "what this analysis is and when it ran",
                 "repository" => "exactly what was analyzed (revision + content digest)",
+                "analysis" => "mode, backend, and isolation tier (honesty: no silent upgrades)",
                 "summary" => "read this first: headline, counts, ranked findings",
                 "workloads" => "every executed run and its outcome",
                 "external_systems" => "everything dialed or declared, with identity and causality",
