@@ -1,9 +1,14 @@
 # Ovid CI: formatting, lints, unit + integration + golden regression tests,
-# pack validation, and performance guardrails.
+# pack validation, MSRV, and performance guardrails.
 #
 # The test job installs strace because the boundary-observation integration
 # tests exercise the real ptrace observer. Perf guardrails run in their own
 # job so a noisy runner never blocks correctness feedback.
+#
+# Every cargo invocation passes `--locked`: CI fails if Cargo.lock is stale
+# rather than silently resolving a different dependency graph than what is
+# committed. Jobs carry explicit timeouts so a hung runner fails fast, and
+# superseded runs on the same ref are cancelled (see `concurrency`).
 
 name: CI
 
@@ -13,14 +18,24 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Cancel an in-flight run when a new commit lands on the same branch/PR:
+# saves runner minutes and gives faster feedback on the latest push.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # Incremental artifacts only bloat the shared cache on ephemeral CI
+  # runners; disabling keeps the Swatinem cache lean and reproducible.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   lint:
     name: Format and lints
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,11 +45,12 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   cross-check:
     name: Cross-platform compilation (macOS, Windows targets)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,52 +58,79 @@ jobs:
           targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - name: Check Windows target (static analysis must compile everywhere)
-        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+        run: cargo check --workspace --all-targets --locked --target x86_64-pc-windows-msvc
       - name: Check macOS target
-        run: cargo check --workspace --all-targets --target aarch64-apple-darwin
+        run: cargo check --workspace --all-targets --locked --target aarch64-apple-darwin
+
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+          echo "Declared MSRV: $msrv"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build on the pinned MSRV (the floor must stay buildable)
+        run: cargo build --workspace --locked
 
   test:
     name: Unit, integration, and golden tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install strace (boundary observer backend)
-        run: sudo apt-get update && sudo apt-get install -y strace
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
       - name: Unit and integration tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Golden regression tests (explicit)
-        run: cargo test -p ovid-cli --test golden
+        run: cargo test -p ovid-cli --test golden --locked
 
   packs:
     name: Pack schema validation
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Validate on-disk pack tree
-        run: cargo run -p ovid-cli -- packs validate packs
+        run: cargo run -p ovid-cli --locked -- packs validate packs
 
   perf:
     name: Performance guardrails
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install strace
-        run: sudo apt-get update && sudo apt-get install -y strace
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
       - name: Perf tests (thresholds are order-of-magnitude guards)
-        run: cargo test -p ovid-cli --test perf -- --ignored --nocapture
+        run: cargo test -p ovid-cli --test perf --locked -- --ignored --nocapture
 
   docs:
     name: Documentation build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: rustdoc (deny warnings)
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked

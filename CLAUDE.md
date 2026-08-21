@@ -151,6 +151,8 @@ Task-specific playbooks live in `.claude/skills/`:
 - `add-scanner` — adding an ecosystem inventory scanner.
 - `add-pack` — authoring/validating packs.
 - `add-boundary-event` — extending the normalized event model end to end.
+- `extend-prove` — changing the prove loop: causal classification rules,
+  treatments, enforcement, or the laboratory gateway/egress.
 - `oss-validation` — running the open-source validation suite and
   updating `docs/VALIDATION.md`.
 
@@ -165,3 +167,6 @@ docs) that keep changes consistent.
   `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
 - Never commit: real credentials, unpinned service images in packs
   (validation rejects them), `target/`, or generated analysis bundles.
+- User-facing changes (a new flag, command, label, or output) get a
+  `CHANGELOG.md` entry under **Unreleased** in the same commit; the
+  release workflow ships tagged binaries from that history.

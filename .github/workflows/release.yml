@@ -38,7 +38,16 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release binary
-        run: cargo build --release -p ovid-cli --target ${{ matrix.target }}
+        run: cargo build --release -p ovid-cli --locked --target ${{ matrix.target }}
+      - name: Smoke test the built binary
+        shell: bash
+        run: |
+          # Each matrix runner is native to its target, so the freshly
+          # built binary runs here — never ship an archive we could not
+          # even start.
+          bin="target/${{ matrix.target }}/release/ovid"
+          [ "${{ matrix.archive }}" = "zip" ] && bin="$bin.exe"
+          "$bin" --version
       - name: Package (tar.gz + sha256)
         if: matrix.archive == 'tar'
         shell: bash

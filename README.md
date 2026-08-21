@@ -65,10 +65,14 @@ The 0.2 surface (primary):
   every destination a workload tries to reach — scheme, host, port,
   method, path — even when a loopback proxy hides it from the syscall
   boundary. The default `--egress deny` contacts **nothing real**
-  (destinations are named and refused inside a network namespace);
-  `--egress allow` forwards through the host proxy to classify network
-  dependencies causally, and can block exactly one service at a time to
-  resolve a coupled group into individual required/optional labels.
+  (destinations are named and refused inside a network namespace), and
+  because each refusal is *enforced*, a destination refused while the
+  baseline still passed is classified `optional` on the strength of that
+  enforcement — deny mode alone labels attempted-and-survivable endpoints,
+  no trial spent. `--egress allow` forwards through the host proxy to
+  classify network dependencies that the workload actually depends on, and
+  can block exactly one service at a time to resolve a coupled group into
+  individual required/optional labels.
 
 Supporting commands and machinery:
 

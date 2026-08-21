@@ -57,10 +57,14 @@ resolve source -> select workload (planner)
 Structural rules, enforced in code rather than by convention:
 
 - `CausalConclusion` has **no public constructor** (proposal §7.5): only
-  `ovid_domain::classify_intervention` can label a dependency
-  required/optional, and its rules (stable passing baseline, enforced
-  treatment, consistent variant outcomes, single-dependency variation
-  for `required`) are unit- and property-tested.
+  the `ovid_domain::classify` module can label a dependency
+  required/optional — `classify_intervention` (controlled treatments),
+  `classify_natural_counterfactual` (a dependency demonstrably unavailable
+  during a passing baseline), and `classify_enforced_deny` (a destination
+  the gateway *enforced* a refusal against while the baseline passed).
+  Their rules (stable passing baseline, enforced treatment, consistent
+  variant outcomes, single-dependency variation for `required`) are unit-
+  and property-tested.
 - Every trial carries an `EnforcementReport` (proposal §7.6). A
   laboratory that cannot enforce a treatment refuses it
   (`LabError::Unsupported`); the use case then classifies the affected
@@ -97,6 +101,19 @@ Structural rules, enforced in code rather than by convention:
   the workspace is synchronous end to end, trials run one at a time in
   0.2, and an async runtime would be an adapter concern leaking inward.
   Revisit alongside bounded parallel trials (proposal §10.6).
+- **ADR-017** Egress is attributed by a lab-controlled gateway, named not
+  guessed (spec §13.10). A loopback proxy hides real destinations from the
+  syscall boundary, so the laboratory runs its own std-only HTTP proxy
+  that records every destination as intent evidence and enforces one of
+  three policies (Deny / Forward / ForwardExcept). `--egress deny` is the
+  default and contacts nothing real: trials run in a network namespace and
+  the in-namespace gateway refuses every proxied request. Because those
+  refusals are enforced, they are counterfactuals in their own right —
+  `classify_enforced_deny` credits them (ADR-014) rather than routing them
+  through the weaker natural-counterfactual path, and they are kept
+  distinct from a `forward-failed` genuine outage. Credential-bearing
+  upstream URLs are rejected and the gateway never forwards a request the
+  policy refuses, so "no real traffic" is enforced, not advisory.
 
 The strangler migration (proposal §18) is complete for the CLI: the
 legacy monolithic pipeline (`inventory`, `observe`, `analyze`,
