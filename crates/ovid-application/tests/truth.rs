@@ -278,6 +278,49 @@ fn hide_trials_respect_the_budget_and_report_what_was_dropped() -> Result<(), Pr
 }
 
 #[test]
+fn budget_is_spent_on_project_tooling_before_ubiquitous_utilities() -> Result<(), ProveError> {
+    // `cat` sorts before `protoc` alphabetically, but a bounded budget
+    // must test the project tool first — proving coreutils required is
+    // the least informative way to spend trials. The untested utility
+    // is still reported, never silently skipped.
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_executables(vec![
+            executable_candidate("cat", true),
+            executable_candidate("protoc", true),
+        ])
+        .with_hide_outcomes("protoc", vec![TrialOutcome::failed("protoc: not found")]);
+    let mut journal = RecordingJournal::default();
+    let tight = ProvePolicy {
+        max_trials: 5, // 2 baseline + one hide pair + 1 replay
+        ..ProvePolicy::default()
+    };
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &tight)?;
+
+    assert!(
+        lab.trials_run.iter().any(|l| l.starts_with("hide-protoc")),
+        "project tooling tested first: {:?}",
+        lab.trials_run
+    );
+    assert!(
+        !lab.trials_run.iter().any(|l| l.starts_with("hide-cat")),
+        "the utility yields its budget slot: {:?}",
+        lab.trials_run
+    );
+    let necessity_of = |name: &str| {
+        report
+            .conclusions
+            .iter()
+            .find(|c| c.conclusion.dependency().logical_identity == name)
+            .map(|c| c.conclusion.necessity())
+    };
+    assert_eq!(necessity_of("protoc"), Some(Necessity::Required));
+    assert_eq!(necessity_of("cat"), Some(Necessity::Unresolved));
+    assert!(report.limitations.iter().any(|l| l.contains("cat")));
+    Ok(())
+}
+
+#[test]
 fn network_natural_counterfactual_skips_the_egress_trial() -> Result<(), ProveError> {
     // The only network candidate already failed every attempt during the
     // passing baseline: optional naturally; no deny-all trial needed.

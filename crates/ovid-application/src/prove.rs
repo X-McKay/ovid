@@ -121,6 +121,75 @@ pub enum ProveError {
     Journal(#[from] JournalError),
 }
 
+/// Ubiquitous POSIX/coreutils-style utilities present in effectively
+/// every execution environment. This is a *scheduling heuristic only*
+/// (proposal §10.5's bounded budget): proving `cat` required is far less
+/// informative for world synthesis than proving `protoc` required, so a
+/// bounded trial budget tests project tooling first and these last.
+/// Classification is unaffected — a utility that does get tested is
+/// classified by exactly the same rules.
+const UBIQUITOUS_UTILITIES: &[&str] = &[
+    "awk",
+    "basename",
+    "cat",
+    "chmod",
+    "chown",
+    "cp",
+    "cut",
+    "date",
+    "df",
+    "diff",
+    "dirname",
+    "du",
+    "echo",
+    "expr",
+    "false",
+    "find",
+    "grep",
+    "head",
+    "hostname",
+    "id",
+    "ln",
+    "ls",
+    "md5sum",
+    "mkdir",
+    "mktemp",
+    "mv",
+    "nproc",
+    "od",
+    "printf",
+    "ps",
+    "pwd",
+    "readlink",
+    "rm",
+    "rmdir",
+    "sed",
+    "seq",
+    "sha1sum",
+    "sha256sum",
+    "sleep",
+    "sort",
+    "stat",
+    "sync",
+    "tail",
+    "tar",
+    "tee",
+    "touch",
+    "tr",
+    "true",
+    "uname",
+    "uniq",
+    "wc",
+    "which",
+    "xargs",
+];
+
+/// Scheduling class for hide-executable trials: 0 = project tooling
+/// (tested first), 1 = ubiquitous utility (tested last).
+fn hide_schedule_class(name: &str) -> u8 {
+    u8::from(UBIQUITOUS_UTILITIES.contains(&name))
+}
+
 /// Journal a batch of freshly minted conclusions and record their
 /// evidence ids.
 fn journal_conclusions(
@@ -457,8 +526,13 @@ pub fn prove(
 
         // Step 3 — per-dependency isolation for executables the baseline
         // used (proposal §10.5 step 5): hide exactly one tool per trial.
-        let hide_targets: Vec<&ExecutableCandidate> =
+        // Project tooling is scheduled before ubiquitous utilities so a
+        // bounded budget is spent on the most informative candidates
+        // first; the order affects only budget spending, never the
+        // classification rules, and remains deterministic.
+        let mut hide_targets: Vec<&ExecutableCandidate> =
             executable_candidates.iter().filter(|e| e.found).collect();
+        hide_targets.sort_by_key(|e| (hide_schedule_class(&e.name), e.name.clone()));
         if !hide_targets.is_empty() {
             if !lab.capabilities().executable_hiding {
                 let reason = "this laboratory cannot hide executables";
