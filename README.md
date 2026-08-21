@@ -149,15 +149,22 @@ Every analysis writes a bundle:
 
 ```text
 ovid-output/
-├── ovid.yaml / ovid.json     # the manifest (human / machine)
+├── ovid.yaml / ovid.json     # the manifest (human / machine, same document)
 ├── evidence.jsonl            # immutable hash-chained evidence ledger
 ├── claims.json               # normalized claims with evidence links
 ├── cyclonedx.json, spdx.json # standards exports
 ├── world.lock.yaml           # reproducible world (analyze mode)
 ├── compose.yaml              # local replay environment (analyze mode)
-├── integration-plan.md       # human-readable plan
-└── provenance.json           # tools, packs, evidence chain head
+└── integration-plan.md       # human-readable plan
 ```
+
+`ovid.yaml` is written in reading order with section banners: a
+`summary` section (headline, counts, ranked findings) comes first, the
+dynamic story (workloads, external systems, unresolved, completeness)
+follows, and the bulk inventory sits near the end. `summary.findings`
+is typed (`severity`, `kind`, `subject`, `detail`) so CI and agents can
+gate on it without parsing prose; provenance (tools, packs, evidence
+chain head) closes the manifest.
 
 ### Notes on trust
 

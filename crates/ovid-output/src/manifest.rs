@@ -11,6 +11,11 @@ use ovid_inventory::{Component, LanguageStat};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Section order is reading order: identity, then the summary and the
+/// dynamic story (workloads, external systems, unresolved, completeness),
+/// then supporting detail, with the bulk inventory second-to-last and
+/// provenance closing the file. Serialization follows this field order in
+/// both YAML and JSON.
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Manifest {
     pub api_version: String,
@@ -18,25 +23,71 @@ pub struct Manifest {
     pub metadata: ManifestMetadata,
     pub repository: RepositorySection,
     pub analysis: AnalysisSection,
+    /// Read-first digest: headline, counts, and ranked findings. A pure
+    /// projection of the sections below — it introduces no new facts.
+    #[serde(default)]
+    pub summary: SummarySection,
     #[serde(default)]
     pub workloads: Vec<WorkloadReport>,
-    pub inventory: InventorySection,
+    #[serde(default)]
+    pub external_systems: Vec<ExternalSystemReport>,
+    #[serde(default)]
+    pub unresolved: Vec<UnresolvedItem>,
+    pub completeness: CompletenessSection,
     #[serde(default)]
     pub build: BuildSection,
     #[serde(default)]
     pub runtime: RuntimeSection,
-    #[serde(default)]
-    pub external_systems: Vec<ExternalSystemReport>,
     #[serde(default)]
     pub world: WorldSection,
     /// Always present, possibly empty — v1 local mode performs no
     /// vulnerability validation, and saying so explicitly beats omission.
     #[serde(default)]
     pub vulnerabilities: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub unresolved: Vec<UnresolvedItem>,
-    pub completeness: CompletenessSection,
+    pub inventory: InventorySection,
     pub provenance: ProvenanceSection,
+}
+
+/// The read-first digest at the top of every manifest (§25.2's summary
+/// posture): one headline, the counts a reviewer scans, and typed
+/// findings ranked `attention` before `note`. Downstream agents can act
+/// on this section alone and follow subjects into the detail sections.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
+pub struct SummarySection {
+    /// One sentence: what happened.
+    #[serde(default)]
+    pub headline: String,
+    #[serde(default)]
+    pub counts: SummaryCounts,
+    /// Ranked, typed findings. Empty means "nothing noteworthy", which is
+    /// itself a statement (completeness still says what was examined).
+    #[serde(default)]
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
+pub struct SummaryCounts {
+    pub workload_runs: usize,
+    pub workloads_passed: usize,
+    pub workloads_failed: usize,
+    pub components_resolved: usize,
+    pub components_loaded: usize,
+    pub external_systems: usize,
+    pub unresolved: usize,
+    pub workloads_not_executed: usize,
+}
+
+/// One noteworthy fact, typed for machine consumption and worded for
+/// human review. `subject` names an entry in the detail sections.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Finding {
+    /// `attention` (act on this) or `note` (worth knowing).
+    pub severity: String,
+    /// Stable machine kind, kebab-case (`workload-failed`,
+    /// `endpoint-runtime-bound`, `declared-endpoint-never-exercised`, …).
+    pub kind: String,
+    pub subject: String,
+    pub detail: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -283,6 +334,7 @@ impl Manifest {
                 isolation_tier: None,
                 runs: RunCounts::default(),
             },
+            summary: SummarySection::default(),
             workloads: Vec::new(),
             inventory: InventorySection::default(),
             build: BuildSection::default(),
@@ -307,8 +359,228 @@ impl Manifest {
         }
     }
 
+    /// Rebuild the read-first summary from the detail sections. Pure
+    /// projection: every number and finding here restates a fact already
+    /// present below it — the summary can never disagree with the file.
+    pub fn build_summary(&self) -> SummarySection {
+        let passed = self
+            .workloads
+            .iter()
+            .filter(|w| w.status == "passed")
+            .count();
+        let failed = self
+            .workloads
+            .iter()
+            .filter(|w| w.status == "failed")
+            .count();
+        let counts = SummaryCounts {
+            workload_runs: self.workloads.len(),
+            workloads_passed: passed,
+            workloads_failed: failed,
+            components_resolved: self
+                .inventory
+                .components
+                .iter()
+                .filter(|c| c.states.resolved)
+                .count(),
+            components_loaded: self
+                .inventory
+                .components
+                .iter()
+                .filter(|c| c.states.loaded)
+                .count(),
+            external_systems: self.external_systems.len(),
+            unresolved: self.unresolved.len(),
+            workloads_not_executed: self.completeness.workloads_not_executed.len(),
+        };
+        let headline = if self.workloads.is_empty() {
+            "static analysis only; no workloads executed".to_string()
+        } else if failed == 0 {
+            match self.unresolved.len() {
+                0 => format!(
+                    "all {} workload runs passed; nothing unresolved",
+                    counts.workload_runs
+                ),
+                n => format!(
+                    "all {} workload runs passed; {n} unresolved item(s) flagged, not guessed",
+                    counts.workload_runs
+                ),
+            }
+        } else {
+            format!("{failed} of {} workload runs failed", counts.workload_runs)
+        };
+
+        let mut findings: Vec<Finding> = Vec::new();
+        for workload in &self.workloads {
+            if workload.status == "failed" {
+                findings.push(Finding {
+                    severity: "attention".into(),
+                    kind: "workload-failed".into(),
+                    subject: workload.name.clone(),
+                    detail: format!("`{}` exited nonzero", workload.command.join(" ")),
+                });
+            }
+        }
+        for system in &self.external_systems {
+            let subject = system.id.clone();
+            if system.causality == Some(CausalClassification::Required) {
+                findings.push(Finding {
+                    severity: "attention".into(),
+                    kind: "required-external-dependency".into(),
+                    subject: subject.clone(),
+                    detail: "workload fails without it (counterfactual evidence)".into(),
+                });
+            }
+            match system.identity.as_str() {
+                "env-parameterized" => findings.push(Finding {
+                    severity: "note".into(),
+                    kind: "endpoint-runtime-bound".into(),
+                    subject: subject.clone(),
+                    detail: format!(
+                        "external connectivity declared; host supplied at runtime by ${}{}",
+                        system.env_var.as_deref().unwrap_or("?"),
+                        system
+                            .url_path
+                            .as_deref()
+                            .map(|p| format!(" ({} …{p})", system.protocol))
+                            .unwrap_or_default()
+                    ),
+                }),
+                "template-placeholder" => findings.push(Finding {
+                    severity: "note".into(),
+                    kind: "endpoint-runtime-bound".into(),
+                    subject: subject.clone(),
+                    detail: "declared endpoint host is a template placeholder; value supplied at deployment"
+                        .into(),
+                }),
+                "declared" if system.attempts == 0 => {
+                    let path = system
+                        .url_path
+                        .as_deref()
+                        .map(|p| format!(", path {p}"))
+                        .unwrap_or_default();
+                    let credential = if system.credential_env.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", credential via {}", system.credential_env.join(", "))
+                    };
+                    findings.push(Finding {
+                        severity: "note".into(),
+                        kind: "declared-endpoint-never-exercised".into(),
+                        subject: subject.clone(),
+                        detail: format!(
+                            "declared in {} location(s){path}{credential} — never dialed by \
+                             any executed workload",
+                            system.declared_sources.len().max(1),
+                        ),
+                    });
+                }
+                _ => {}
+            }
+            if system.protocol == "unknown" && system.attempts > 0 {
+                findings.push(Finding {
+                    severity: "note".into(),
+                    kind: "unclassified-protocol".into(),
+                    subject,
+                    detail: format!(
+                        "{} attempt(s), {} failure(s); no protocol pack matched",
+                        system.attempts, system.failures
+                    ),
+                });
+            }
+        }
+        for tool in &self.build.tools {
+            if tool.causality == Some(CausalClassification::Unresolved) || tool.causality.is_none()
+            {
+                findings.push(Finding {
+                    severity: "note".into(),
+                    kind: "tool-unresolved".into(),
+                    subject: format!("tool:{}", tool.name),
+                    detail: match &tool.candidate_package {
+                        Some(candidate) => {
+                            format!("missing on PATH; resolver candidate {candidate}")
+                        }
+                        None => "missing on PATH; no trusted resolver candidate".into(),
+                    },
+                });
+            }
+        }
+        if !self.completeness.workloads_not_executed.is_empty() {
+            findings.push(Finding {
+                severity: "note".into(),
+                kind: "coverage-gap".into(),
+                subject: "workloads".into(),
+                detail: format!(
+                    "{} discovered candidate(s) not executed — see completeness.workloads_not_executed",
+                    self.completeness.workloads_not_executed.len()
+                ),
+            });
+        }
+        findings.sort_by(|a, b| {
+            let rank = |s: &str| if s == "attention" { 0 } else { 1 };
+            rank(&a.severity)
+                .cmp(&rank(&b.severity))
+                .then_with(|| a.kind.cmp(&b.kind))
+                .then_with(|| a.subject.cmp(&b.subject))
+        });
+        SummarySection {
+            headline,
+            counts,
+            findings,
+        }
+    }
+
     pub fn to_yaml(&self) -> String {
         serde_yaml::to_string(self).expect("manifests serialize")
+    }
+
+    /// YAML with a file header and one banner comment per section — the
+    /// human-facing rendering. Content is byte-identical to [`to_yaml`]
+    /// minus comments; parsers see the same document.
+    pub fn to_yaml_annotated(&self) -> String {
+        let blurb = |section: &str| -> Option<&'static str> {
+            Some(match section {
+                "metadata" => "what this analysis is and when it ran",
+                "repository" => "exactly what was analyzed (revision + content digest)",
+                "summary" => "read this first: headline, counts, ranked findings",
+                "workloads" => "every executed run and its outcome",
+                "external_systems" => "everything dialed or declared, with identity and causality",
+                "unresolved" => "explicitly unknown — flagged instead of guessed (§6.6)",
+                "completeness" => "what was examined, collapsed, dropped, and NOT executed",
+                "build" => "commands run, tools probed, artifacts produced",
+                "runtime" => "listeners and sockets observed",
+                "world" => "synthesized replay world (see world.lock.yaml)",
+                "vulnerabilities" => "empty means not validated, not vulnerability-free",
+                "inventory" => "full component inventory (bulk detail; states are independent)",
+                "provenance" => "evidence chain head, tool and pack versions",
+                _ => return None,
+            })
+        };
+        let value = serde_yaml::to_value(self).expect("manifests serialize");
+        let serde_yaml::Value::Mapping(map) = value else {
+            return self.to_yaml();
+        };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# Ovid analysis manifest — generated by ovid {OVID_VERSION}\n\
+             # Reading order: summary -> workloads -> external_systems -> unresolved -> completeness.\n\
+             # evidence.jsonl is the canonical ledger; every id here resolves into it\n\
+             # (`ovid explain <id>`). ovid.json is this same document for machines.\n"
+        ));
+        for (key, section) in map {
+            let name = key.as_str().unwrap_or_default().to_string();
+            if let Some(text) = blurb(&name) {
+                let pad = "\u{2500}".repeat(56usize.saturating_sub(name.len()));
+                out.push_str(&format!("\n# \u{2500}\u{2500} {name} {pad}\n# {text}\n"));
+            }
+            let mut single = serde_yaml::Mapping::new();
+            single.insert(serde_yaml::Value::String(name), section);
+            out.push_str(
+                &serde_yaml::to_string(&serde_yaml::Value::Mapping(single))
+                    .expect("manifest sections serialize"),
+            );
+        }
+        out
     }
 
     pub fn to_json_pretty(&self) -> String {
@@ -363,5 +635,83 @@ mod tests {
         // §25.3: consumers must see explicit empty sections + completeness.
         assert!(yaml.contains("vulnerabilities: []"));
         assert!(yaml.contains("unresolved: []"));
+    }
+
+    fn manifest_with_story() -> Manifest {
+        let mut manifest = Manifest::new("analysis:test".into(), "tomography", sample_repository());
+        manifest.workloads.push(WorkloadReport {
+            id: "workload:test-offline".into(),
+            name: "test-offline".into(),
+            command: vec!["make".into(), "test".into()],
+            success_predicate: "exit-code == 0".into(),
+            status: "failed".into(),
+            duration_ms: Some(10),
+            world_digest: None,
+        });
+        manifest.external_systems.push(ExternalSystemReport {
+            id: "env:LLM_HOST".into(),
+            protocol: "https".into(),
+            address: "${LLM_HOST}".into(),
+            port: 443,
+            dns_name: None,
+            endpoints: vec![],
+            identity: "env-parameterized".into(),
+            declared: true,
+            attempts: 0,
+            failures: 0,
+            outcomes: vec![],
+            causality: None,
+            treatment: None,
+            url_path: Some("/v1".into()),
+            env_var: Some("LLM_HOST".into()),
+            credential_env: vec![],
+            declared_sources: vec!["config/app.yaml (model.base_url)".into()],
+            evidence: vec![],
+        });
+        manifest
+            .completeness
+            .workloads_not_executed
+            .push("Test: `make e2e` (Makefile)".into());
+        manifest
+    }
+
+    #[test]
+    fn summary_is_a_ranked_projection_of_the_sections() {
+        let manifest = manifest_with_story();
+        let summary = manifest.build_summary();
+        assert!(summary.headline.contains("1 of 1 workload runs failed"));
+        assert_eq!(summary.counts.workloads_failed, 1);
+        assert_eq!(summary.counts.workloads_not_executed, 1);
+        // Attention findings rank before notes.
+        assert_eq!(summary.findings[0].kind, "workload-failed");
+        assert_eq!(summary.findings[0].severity, "attention");
+        let kinds: Vec<&str> = summary.findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"endpoint-runtime-bound"));
+        assert!(kinds.contains(&"coverage-gap"));
+        let bound = summary
+            .findings
+            .iter()
+            .find(|f| f.kind == "endpoint-runtime-bound")
+            .unwrap();
+        assert!(bound.detail.contains("$LLM_HOST"), "{}", bound.detail);
+    }
+
+    #[test]
+    fn annotated_yaml_reads_summary_first_and_inventory_late() {
+        let mut manifest = manifest_with_story();
+        manifest.summary = manifest.build_summary();
+        let yaml = manifest.to_yaml_annotated();
+        assert!(yaml.starts_with("# Ovid analysis manifest"));
+        assert!(yaml.contains("# \u{2500}\u{2500} summary "));
+        let position = |needle: &str| yaml.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        assert!(position("\nsummary:") < position("\nworkloads:"));
+        assert!(position("\nworkloads:") < position("\nexternal_systems:"));
+        assert!(position("\ncompleteness:") < position("\ninventory:"));
+        assert!(position("\ninventory:") < position("\nprovenance:"));
+        // Comments only — stripped of them, the document parses back into
+        // the same manifest.
+        let back: Manifest = serde_yaml::from_str(&yaml).expect("annotated yaml parses");
+        assert_eq!(back.summary.findings.len(), manifest.summary.findings.len());
+        assert_eq!(back.repository.revision, "deadbeef");
     }
 }

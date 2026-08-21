@@ -923,9 +923,12 @@ fn finalize(ctx: &mut Context, manifest: &mut Manifest, lock: Option<&WorldLock>
     };
     manifest.provenance.evidence_chain_head = ctx.ledger.chain_head().cloned();
     manifest.provenance.packs = ctx.registry.all().iter().map(|p| p.label()).collect();
+    // The read-first summary is a projection of the finished sections, so
+    // it is rebuilt last and can never disagree with the file.
+    manifest.summary = manifest.build_summary();
 
     ctx.claims.save().map_err(|e| anyhow!("{e}"))?;
-    std::fs::write(ctx.out_dir.join("ovid.yaml"), manifest.to_yaml())?;
+    std::fs::write(ctx.out_dir.join("ovid.yaml"), manifest.to_yaml_annotated())?;
     std::fs::write(ctx.out_dir.join("ovid.json"), manifest.to_json_pretty())?;
     std::fs::write(
         ctx.out_dir.join("cyclonedx.json"),
@@ -939,10 +942,8 @@ fn finalize(ctx: &mut Context, manifest: &mut Manifest, lock: Option<&WorldLock>
         ctx.out_dir.join("integration-plan.md"),
         integration_plan_markdown(manifest, lock),
     )?;
-    std::fs::write(
-        ctx.out_dir.join("provenance.json"),
-        serde_json::to_string_pretty(&manifest.provenance)?,
-    )?;
+    // provenance.json was a byte-for-byte copy of the manifest's
+    // provenance section; the manifest is the single home for it now.
     if let Some(lock) = lock {
         std::fs::write(ctx.out_dir.join("world.lock.yaml"), lock.to_yaml())?;
         std::fs::write(ctx.out_dir.join("compose.yaml"), lock.to_compose_yaml())?;

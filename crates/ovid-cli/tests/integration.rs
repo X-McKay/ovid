@@ -77,10 +77,13 @@ fn inventory_node_fixture_merges_declared_and_resolved() {
         "integration-plan.md",
         "evidence.jsonl",
         "claims.json",
-        "provenance.json",
     ] {
         assert!(out.join(file).exists(), "{file} missing from bundle");
     }
+    assert!(
+        !out.join("provenance.json").exists(),
+        "provenance lives in the manifest, not a duplicate file"
+    );
 }
 
 #[test]
