@@ -58,12 +58,18 @@ pub struct IdGenerator {
 
 impl IdGenerator {
     pub fn new() -> Self {
-        IdGenerator { counter: AtomicU64::new(0), deterministic: false }
+        IdGenerator {
+            counter: AtomicU64::new(0),
+            deterministic: false,
+        }
     }
 
     /// Deterministic generator for tests and reproducible fixtures.
     pub fn deterministic() -> Self {
-        IdGenerator { counter: AtomicU64::new(0), deterministic: true }
+        IdGenerator {
+            counter: AtomicU64::new(0),
+            deterministic: true,
+        }
     }
 
     /// Create the next id with the given kind prefix.
@@ -74,7 +80,11 @@ impl IdGenerator {
         } else {
             chrono::Utc::now().timestamp_millis().max(0) as u64
         };
-        OvidId(format!("{kind}:{}{}", encode_base32(millis, 10), encode_base32(n, 8)))
+        OvidId(format!(
+            "{kind}:{}{}",
+            encode_base32(millis, 10),
+            encode_base32(n, 8)
+        ))
     }
 }
 

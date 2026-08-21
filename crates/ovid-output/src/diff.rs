@@ -107,34 +107,61 @@ pub fn diff_manifests(before: &Manifest, after: &Manifest) -> ManifestDiff {
     }
 
     let externals = |manifest: &Manifest| -> Vec<String> {
-        manifest.external_systems.iter().map(|s| s.id.clone()).collect()
+        manifest
+            .external_systems
+            .iter()
+            .map(|s| s.id.clone())
+            .collect()
     };
     let before_external = externals(before);
     let after_external = externals(after);
-    diff.external_added =
-        after_external.iter().filter(|id| !before_external.contains(id)).cloned().collect();
-    diff.external_removed =
-        before_external.iter().filter(|id| !after_external.contains(id)).cloned().collect();
+    diff.external_added = after_external
+        .iter()
+        .filter(|id| !before_external.contains(id))
+        .cloned()
+        .collect();
+    diff.external_removed = before_external
+        .iter()
+        .filter(|id| !after_external.contains(id))
+        .cloned()
+        .collect();
 
     let listeners = |manifest: &Manifest| -> Vec<u16> {
         manifest.runtime.listeners.iter().map(|l| l.port).collect()
     };
     let before_listeners = listeners(before);
     let after_listeners = listeners(after);
-    diff.listeners_added =
-        after_listeners.iter().filter(|p| !before_listeners.contains(p)).copied().collect();
-    diff.listeners_removed =
-        before_listeners.iter().filter(|p| !after_listeners.contains(p)).copied().collect();
+    diff.listeners_added = after_listeners
+        .iter()
+        .filter(|p| !before_listeners.contains(p))
+        .copied()
+        .collect();
+    diff.listeners_removed = before_listeners
+        .iter()
+        .filter(|p| !after_listeners.contains(p))
+        .copied()
+        .collect();
 
     let tools = |manifest: &Manifest| -> Vec<String> {
-        manifest.build.tools.iter().map(|t| t.name.clone()).collect()
+        manifest
+            .build
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
     };
     let before_tools = tools(before);
     let after_tools = tools(after);
-    diff.tools_added =
-        after_tools.iter().filter(|t| !before_tools.contains(t)).cloned().collect();
-    diff.tools_removed =
-        before_tools.iter().filter(|t| !after_tools.contains(t)).cloned().collect();
+    diff.tools_added = after_tools
+        .iter()
+        .filter(|t| !before_tools.contains(t))
+        .cloned()
+        .collect();
+    diff.tools_removed = before_tools
+        .iter()
+        .filter(|t| !after_tools.contains(t))
+        .cloned()
+        .collect();
 
     diff
 }
@@ -187,7 +214,10 @@ mod tests {
             source_file: "Cargo.lock".into(),
         });
         let diff = diff_manifests(&before, &after);
-        assert_eq!(diff.version_changes["cargo/serde"], ("1.0.100".into(), "1.0.200".into()));
+        assert_eq!(
+            diff.version_changes["cargo/serde"],
+            ("1.0.100".into(), "1.0.200".into())
+        );
         assert_eq!(diff.components_added, vec!["cargo/anyhow"]);
         assert!(diff.components_removed.is_empty());
         assert!(diff.to_markdown().contains("1.0.100 -> 1.0.200"));

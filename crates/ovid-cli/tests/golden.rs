@@ -21,7 +21,12 @@ fn normalized_inventory(fixture: &str) -> serde_json::Value {
     let _ = std::fs::remove_dir_all(&out);
     let fixture_path = fixtures().join(fixture);
     let output = Command::new(env!("CARGO_BIN_EXE_ovid"))
-        .args(["inventory", fixture_path.to_str().unwrap(), "--out", out.to_str().unwrap()])
+        .args([
+            "inventory",
+            fixture_path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
         .output()
         .expect("ovid runs");
     assert!(
@@ -40,11 +45,16 @@ fn normalized_inventory(fixture: &str) -> serde_json::Value {
 }
 
 fn check_golden(fixture: &str) {
-    let golden_path = fixtures().join("golden").join(format!("{fixture}.inventory.json"));
+    let golden_path = fixtures()
+        .join("golden")
+        .join(format!("{fixture}.inventory.json"));
     let actual = normalized_inventory(fixture);
     if std::env::var("UPDATE_GOLDENS").is_ok() {
-        std::fs::write(&golden_path, serde_json::to_string_pretty(&actual).unwrap() + "\n")
-            .unwrap();
+        std::fs::write(
+            &golden_path,
+            serde_json::to_string_pretty(&actual).unwrap() + "\n",
+        )
+        .unwrap();
         eprintln!("updated {}", golden_path.display());
         return;
     }

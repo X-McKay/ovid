@@ -44,9 +44,18 @@ fn language_for_extension(ext: &str) -> Option<&'static str> {
 /// Common vendored/generated directories excluded from language stats so a
 /// vendored dependency tree does not dominate the profile.
 fn is_vendored(path: &str) -> bool {
-    let prefixes =
-        ["node_modules/", "vendor/", "target/", "dist/", "build/", ".venv/", "venv/"];
-    prefixes.iter().any(|p| path.starts_with(p) || path.contains(&format!("/{p}")))
+    let prefixes = [
+        "node_modules/",
+        "vendor/",
+        "target/",
+        "dist/",
+        "build/",
+        ".venv/",
+        "venv/",
+    ];
+    prefixes
+        .iter()
+        .any(|p| path.starts_with(p) || path.contains(&format!("/{p}")))
 }
 
 pub fn detect_languages(snapshot: &RepoSnapshot) -> Vec<LanguageStat> {
@@ -56,8 +65,12 @@ pub fn detect_languages(snapshot: &RepoSnapshot) -> Vec<LanguageStat> {
         if is_vendored(path) {
             continue;
         }
-        let Some(ext) = path.rsplit('.').next().filter(|e| !e.contains('/')) else { continue };
-        let Some(lang) = language_for_extension(&ext.to_lowercase()) else { continue };
+        let Some(ext) = path.rsplit('.').next().filter(|e| !e.contains('/')) else {
+            continue;
+        };
+        let Some(lang) = language_for_extension(&ext.to_lowercase()) else {
+            continue;
+        };
         let slot = bytes.entry(lang).or_insert((0, 0));
         slot.0 += entry.size;
         slot.1 += 1;
@@ -96,7 +109,11 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n".repeat(50)).unwrap();
         std::fs::write(dir.path().join("helper.py"), "print('x')\n").unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/dep")).unwrap();
-        std::fs::write(dir.path().join("node_modules/dep/index.js"), "x".repeat(9999)).unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/dep/index.js"),
+            "x".repeat(9999),
+        )
+        .unwrap();
         let snapshot = acquire(
             &RepositorySource::parse(dir.path().to_str().unwrap(), None),
             &AcquireOptions::new(dir.path().join(".work")),
@@ -107,6 +124,9 @@ mod tests {
         // Vendored node_modules must not appear.
         assert!(!stats.iter().any(|s| s.name == "javascript"));
         let sum: f64 = stats.iter().map(|s| s.estimated_fraction).sum();
-        assert!((sum - 1.0).abs() < 0.01, "fractions should sum to ~1: {sum}");
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "fractions should sum to ~1: {sum}"
+        );
     }
 }

@@ -32,9 +32,11 @@ fn dep_component(name: &str, spec: &toml::Value, scope: Scope, source: &str) -> 
     // Specs are either a version string or a table with optional `version`,
     // `path`, `git`, `package` (rename) keys.
     let real_name = match spec {
-        toml::Value::Table(t) => {
-            t.get("package").and_then(|v| v.as_str()).unwrap_or(name).to_string()
-        }
+        toml::Value::Table(t) => t
+            .get("package")
+            .and_then(|v| v.as_str())
+            .unwrap_or(name)
+            .to_string(),
         _ => name.to_string(),
     };
     Component {
@@ -54,7 +56,9 @@ fn dep_component(name: &str, spec: &toml::Value, scope: Scope, source: &str) -> 
 
 fn scan_manifest(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = text.parse::<toml::Value>() else {
-        report.warnings.push(format!("unparseable Cargo.toml at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable Cargo.toml at {source}"));
         return;
     };
     let sections = [
@@ -73,7 +77,9 @@ fn scan_manifest(text: &str, source: &str, report: &mut InventoryReport) {
         {
             if let Some(deps) = table.as_table() {
                 for (name, spec) in deps {
-                    report.components.push(dep_component(name, spec, scope, source));
+                    report
+                        .components
+                        .push(dep_component(name, spec, scope, source));
                 }
             }
         }
@@ -82,10 +88,14 @@ fn scan_manifest(text: &str, source: &str, report: &mut InventoryReport) {
 
 fn scan_lockfile(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = text.parse::<toml::Value>() else {
-        report.warnings.push(format!("unparseable Cargo.lock at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable Cargo.lock at {source}"));
         return;
     };
-    let Some(packages) = value.get("package").and_then(|p| p.as_array()) else { return };
+    let Some(packages) = value.get("package").and_then(|p| p.as_array()) else {
+        return;
+    };
     for package in packages {
         let (Some(name), Some(version)) = (
             package.get("name").and_then(|v| v.as_str()),
@@ -163,7 +173,11 @@ version = "1.0.11"
         // rename respected.
         assert!(report.components.iter().any(|c| c.name == "actual-crate"));
         // dev dep declared but unpinned.
-        let tf = report.components.iter().find(|c| c.name == "tempfile").unwrap();
+        let tf = report
+            .components
+            .iter()
+            .find(|c| c.name == "tempfile")
+            .unwrap();
         assert_eq!(tf.scope, crate::Scope::Dev);
     }
 }

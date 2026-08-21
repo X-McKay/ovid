@@ -96,15 +96,24 @@ pub struct ActionGraph {
 impl ActionGraph {
     /// Best candidate of a kind, if any.
     pub fn best(&self, kind: ActionKind) -> Option<&Action> {
-        self.actions.iter().filter(|a| a.kind == kind).max_by(|a, b| {
-            a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)
-        })
+        self.actions
+            .iter()
+            .filter(|a| a.kind == kind)
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     /// All candidates of a kind, best first.
     pub fn candidates(&self, kind: ActionKind) -> Vec<&Action> {
         let mut list: Vec<&Action> = self.actions.iter().filter(|a| a.kind == kind).collect();
-        list.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        list.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         list
     }
 }
@@ -130,7 +139,12 @@ fn risk_penalty(command: &[String]) -> f64 {
 fn classify(command: &[String]) -> ActionKind {
     let joined = command.join(" ");
     let has = |needle: &str| joined.contains(needle);
-    if has("install") || has("npm ci") || has("pip install") || has("uv sync") || has("bundle install") {
+    if has("install")
+        || has("npm ci")
+        || has("pip install")
+        || has("uv sync")
+        || has("bundle install")
+    {
         ActionKind::DependencyInstall
     } else if has("test") || has("pytest") || has("check") || has("spec") {
         ActionKind::Test
@@ -173,7 +187,13 @@ pub fn plan(snapshot: &RepoSnapshot, registry: &PackRegistry) -> ActionGraph {
     };
 
     for mined in miners::mine_all(snapshot) {
-        push(mined.command, mined.source, mined.source_file, mined.kind_hint, &mut actions);
+        push(
+            mined.command,
+            mined.source,
+            mined.source_file,
+            mined.kind_hint,
+            &mut actions,
+        );
     }
 
     // Runner recipes: conventional commands for detected ecosystems.
@@ -257,7 +277,10 @@ mod tests {
     #[test]
     fn ci_commands_outrank_recipe_conventions() {
         let snapshot = snapshot_with(&[
-            ("Cargo.toml", "[package]\nname = \"x\"\nversion = \"0.0.1\"\n"),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"x\"\nversion = \"0.0.1\"\n",
+            ),
             (
                 ".github/workflows/ci.yml",
                 "jobs:\n  test:\n    steps:\n      - run: cargo test --workspace --all-features\n",
@@ -285,7 +308,10 @@ mod tests {
         let graph = plan(&snapshot, &registry);
         for action in &graph.actions {
             let joined = action.command.join(" ");
-            assert!(!joined.contains("| sh"), "piped install must be dropped: {joined}");
+            assert!(
+                !joined.contains("| sh"),
+                "piped install must be dropped: {joined}"
+            );
             assert!(action.command[0] != "rm", "rm must be dropped");
         }
         assert!(graph.actions.iter().any(|a| a.command[0] == "cargo"));
@@ -300,6 +326,9 @@ mod tests {
         let registry = PackRegistry::builtin().unwrap();
         let graph = plan(&snapshot, &registry);
         let test = graph.best(ActionKind::Test).unwrap();
-        assert!(!test.prerequisites.is_empty(), "test should depend on install");
+        assert!(
+            !test.prerequisites.is_empty(),
+            "test should depend on install"
+        );
     }
 }

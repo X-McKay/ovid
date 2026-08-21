@@ -32,9 +32,17 @@ pub enum DnsMode {
 }
 
 /// Metadata endpoints that are always blocked (§17.2 item 5, §30.3).
-const METADATA_ADDRESSES: &[&str] = &["169.254.169.254", "fd00:ec2::254", "metadata.google.internal"];
-const METADATA_NAMES: &[&str] =
-    &["metadata.google.internal", "metadata", "instance-data", "169.254.169.254"];
+const METADATA_ADDRESSES: &[&str] = &[
+    "169.254.169.254",
+    "fd00:ec2::254",
+    "metadata.google.internal",
+];
+const METADATA_NAMES: &[&str] = &[
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+    "169.254.169.254",
+];
 
 /// Default approved registry hosts for `RegistriesOnly` mode.
 const DEFAULT_REGISTRY_HOSTS: &[&str] = &[
@@ -70,7 +78,10 @@ impl Default for NetworkPolicy {
         NetworkPolicy {
             egress: EgressMode::Deny,
             dns: DnsMode::Strict,
-            registry_hosts: DEFAULT_REGISTRY_HOSTS.iter().map(|s| s.to_string()).collect(),
+            registry_hosts: DEFAULT_REGISTRY_HOSTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             service_aliases: BTreeMap::new(),
         }
     }
@@ -78,7 +89,10 @@ impl Default for NetworkPolicy {
 
 impl NetworkPolicy {
     pub fn registries_only() -> Self {
-        NetworkPolicy { egress: EgressMode::RegistriesOnly, ..Default::default() }
+        NetworkPolicy {
+            egress: EgressMode::RegistriesOnly,
+            ..Default::default()
+        }
     }
 
     fn is_registry_host(&self, name: &str) -> bool {
@@ -97,7 +111,9 @@ impl NetworkPolicy {
             return DnsDecision::Blocked;
         }
         if let Some(address) = self.service_aliases.get(name) {
-            return DnsDecision::ServiceAlias { address: address.clone() };
+            return DnsDecision::ServiceAlias {
+                address: address.clone(),
+            };
         }
         if self.egress != EgressMode::Deny && self.is_registry_host(name) {
             return DnsDecision::RegistryProxy;
@@ -106,9 +122,9 @@ impl NetworkPolicy {
             return DnsDecision::Upstream;
         }
         match self.dns {
-            DnsMode::Explore => {
-                DnsDecision::VirtualIdentity { address: allocator.allocate(name).to_string() }
-            }
+            DnsMode::Explore => DnsDecision::VirtualIdentity {
+                address: allocator.allocate(name).to_string(),
+            },
             DnsMode::Strict => DnsDecision::NxDomain,
         }
     }
@@ -137,13 +153,17 @@ impl NetworkPolicy {
 #[serde(tag = "decision", rename_all = "kebab-case")]
 pub enum DnsDecision {
     /// Known world service.
-    ServiceAlias { address: String },
+    ServiceAlias {
+        address: String,
+    },
     /// Approved registry through the recording proxy (FR-042).
     RegistryProxy,
     /// Resolved upstream (trusted policy only).
     Upstream,
     /// Job-local virtual identity for discovery (FR-043).
-    VirtualIdentity { address: String },
+    VirtualIdentity {
+        address: String,
+    },
     NxDomain,
     Blocked,
 }
@@ -169,7 +189,11 @@ pub struct VirtualIdentityAllocator {
 
 impl VirtualIdentityAllocator {
     pub fn new(job_octet: u8) -> Self {
-        VirtualIdentityAllocator { job_octet, next_host: 200, assigned: BTreeMap::new() }
+        VirtualIdentityAllocator {
+            job_octet,
+            next_host: 200,
+            assigned: BTreeMap::new(),
+        }
     }
 
     /// Same name always gets the same identity within a job.
@@ -216,7 +240,10 @@ mod tests {
     fn default_policy_denies_unknown_dns() {
         let policy = NetworkPolicy::default();
         let mut allocator = VirtualIdentityAllocator::new(17);
-        assert_eq!(policy.decide_dns("payments.internal", &mut allocator), DnsDecision::NxDomain);
+        assert_eq!(
+            policy.decide_dns("payments.internal", &mut allocator),
+            DnsDecision::NxDomain
+        );
     }
 
     #[test]
@@ -228,25 +255,37 @@ mod tests {
             ..Default::default()
         };
         let mut allocator = VirtualIdentityAllocator::new(1);
-        assert_eq!(policy.decide_dns("169.254.169.254", &mut allocator), DnsDecision::Blocked);
+        assert_eq!(
+            policy.decide_dns("169.254.169.254", &mut allocator),
+            DnsDecision::Blocked
+        );
         assert_eq!(
             policy.decide_dns("metadata.google.internal", &mut allocator),
             DnsDecision::Blocked
         );
-        assert_eq!(policy.decide_connect("169.254.169.254", 80), ConnectDecision::Blocked);
+        assert_eq!(
+            policy.decide_connect("169.254.169.254", 80),
+            ConnectDecision::Blocked
+        );
     }
 
     #[test]
     fn registries_route_to_proxy() {
         let policy = NetworkPolicy::registries_only();
         let mut allocator = VirtualIdentityAllocator::new(1);
-        assert_eq!(policy.decide_dns("crates.io", &mut allocator), DnsDecision::RegistryProxy);
+        assert_eq!(
+            policy.decide_dns("crates.io", &mut allocator),
+            DnsDecision::RegistryProxy
+        );
         assert_eq!(
             policy.decide_dns("static.crates.io", &mut allocator),
             DnsDecision::RegistryProxy
         );
         // Non-registry names still get NXDOMAIN under strict DNS.
-        assert_eq!(policy.decide_dns("evil.example.com", &mut allocator), DnsDecision::NxDomain);
+        assert_eq!(
+            policy.decide_dns("evil.example.com", &mut allocator),
+            DnsDecision::NxDomain
+        );
     }
 
     #[test]
@@ -259,27 +298,45 @@ mod tests {
         let first = policy.decide_dns("payments", &mut allocator);
         let second = policy.decide_dns("payments", &mut allocator);
         assert_eq!(first, second, "same name must resolve to the same identity");
-        let DnsDecision::VirtualIdentity { address } = first else { panic!("wrong decision") };
-        assert!(address.starts_with("10.203.17.2"), "virtual range is .200+: {address}");
+        let DnsDecision::VirtualIdentity { address } = first else {
+            panic!("wrong decision")
+        };
+        assert!(
+            address.starts_with("10.203.17.2"),
+            "virtual range is .200+: {address}"
+        );
         assert_eq!(allocator.name_for(&address), Some("payments"));
     }
 
     #[test]
     fn world_aliases_win_over_everything_but_metadata() {
         let mut policy = NetworkPolicy::default();
-        policy.service_aliases.insert("orders-db".into(), "10.203.17.22".into());
+        policy
+            .service_aliases
+            .insert("orders-db".into(), "10.203.17.22".into());
         let mut allocator = VirtualIdentityAllocator::new(17);
         assert_eq!(
             policy.decide_dns("orders-db", &mut allocator),
-            DnsDecision::ServiceAlias { address: "10.203.17.22".into() }
+            DnsDecision::ServiceAlias {
+                address: "10.203.17.22".into()
+            }
         );
-        assert_eq!(policy.decide_connect("10.203.17.22", 5432), ConnectDecision::AllowedService);
+        assert_eq!(
+            policy.decide_connect("10.203.17.22", 5432),
+            ConnectDecision::AllowedService
+        );
     }
 
     #[test]
     fn deny_blocks_external_connects_but_allows_loopback() {
         let policy = NetworkPolicy::default();
-        assert_eq!(policy.decide_connect("93.184.216.34", 443), ConnectDecision::Blocked);
-        assert_eq!(policy.decide_connect("127.0.0.1", 5432), ConnectDecision::AllowedLocal);
+        assert_eq!(
+            policy.decide_connect("93.184.216.34", 443),
+            ConnectDecision::Blocked
+        );
+        assert_eq!(
+            policy.decide_connect("127.0.0.1", 5432),
+            ConnectDecision::AllowedLocal
+        );
     }
 }

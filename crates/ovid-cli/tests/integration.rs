@@ -43,8 +43,12 @@ fn temp_out(name: &str) -> PathBuf {
 fn inventory_node_fixture_merges_declared_and_resolved() {
     let out = temp_out("node");
     let fixture = fixtures().join("node-app");
-    let (ok, stdout, stderr) =
-        run_ovid(&["inventory", fixture.to_str().unwrap(), "--out", out.to_str().unwrap()]);
+    let (ok, stdout, stderr) = run_ovid(&[
+        "inventory",
+        fixture.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
     assert!(ok, "inventory failed: {stderr}");
     assert!(stdout.contains("components:"));
 
@@ -56,14 +60,25 @@ fn inventory_node_fixture_merges_declared_and_resolved() {
         .expect("express merged entry");
     assert_eq!(express["states"]["declared"], true);
     assert_eq!(express["states"]["resolved"], true);
-    assert!(components.iter().any(|c| c["name"] == "accepts"), "transitive dep present");
+    assert!(
+        components.iter().any(|c| c["name"] == "accepts"),
+        "transitive dep present"
+    );
     // Static inventory must never claim dynamic states (§6.3).
     for component in components {
         assert!(component["states"]["loaded"].is_null());
         assert!(component["states"]["exercised"].is_null());
     }
     // Full bundle written.
-    for file in ["ovid.yaml", "cyclonedx.json", "spdx.json", "integration-plan.md", "evidence.jsonl", "claims.json", "provenance.json"] {
+    for file in [
+        "ovid.yaml",
+        "cyclonedx.json",
+        "spdx.json",
+        "integration-plan.md",
+        "evidence.jsonl",
+        "claims.json",
+        "provenance.json",
+    ] {
         assert!(out.join(file).exists(), "{file} missing from bundle");
     }
 }
@@ -94,7 +109,10 @@ fn observe_python_fixture_finds_optional_database() {
     // counterfactual => optional.
     assert_eq!(db["causality"], "optional");
     assert!(db["failures"].as_u64().unwrap() >= 1);
-    assert!(!db["evidence"].as_array().unwrap().is_empty(), "external claims link evidence");
+    assert!(
+        !db["evidence"].as_array().unwrap().is_empty(),
+        "external claims link evidence"
+    );
 
     // Declared python deps present from pyproject/requirements.
     let components = manifest["inventory"]["components"].as_array().unwrap();
@@ -117,10 +135,15 @@ fn evidence_chain_verifies_after_analysis() {
     assert!(ok, "observe failed: {stderr}");
     let ledger = ovid_evidence::EvidenceLedger::open(out.join("evidence.jsonl")).unwrap();
     assert!(!ledger.is_empty());
-    let head = ledger.verify_chain().expect("chain verifies").expect("chain head");
+    let head = ledger
+        .verify_chain()
+        .expect("chain verifies")
+        .expect("chain head");
     let manifest = load_manifest(&out);
     assert_eq!(
-        manifest["provenance"]["evidence_chain_head"].as_str().unwrap(),
+        manifest["provenance"]["evidence_chain_head"]
+            .as_str()
+            .unwrap(),
         head.as_str(),
         "manifest provenance must publish the verified chain head"
     );
@@ -150,9 +173,17 @@ fn analyze_missing_tool_fixture_proposes_resolver_candidate() {
     let tool = tools
         .iter()
         .find(|t| t["name"] == "ovid-fixture-protoc")
-        .unwrap_or_else(|| panic!("missing tool not reported: {stdout}\n{:?}", manifest["build"]));
+        .unwrap_or_else(|| {
+            panic!(
+                "missing tool not reported: {stdout}\n{:?}",
+                manifest["build"]
+            )
+        });
     assert_eq!(tool["discovered_by"], "failed-exec");
-    assert_eq!(tool["candidate_package"], "fixture-provider:fixture-protoc-package");
+    assert_eq!(
+        tool["candidate_package"],
+        "fixture-provider:fixture-protoc-package"
+    );
     // The misses are first-class evidence in the ledger (§6.2).
     let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();
     assert!(ledger_text.contains("ovid-fixture-protoc"));
@@ -179,28 +210,44 @@ fn analyze_network_fixture_synthesizes_world_with_service_packs() {
     assert_eq!(manifest["workloads"][0]["status"], "passed", "{stdout}");
 
     let external = manifest["external_systems"].as_array().unwrap();
-    let ports: Vec<u64> =
-        external.iter().map(|s| s["port"].as_u64().unwrap()).collect();
-    assert!(ports.contains(&5432) && ports.contains(&6379), "both services observed: {ports:?}");
+    let ports: Vec<u64> = external
+        .iter()
+        .map(|s| s["port"].as_u64().unwrap())
+        .collect();
+    assert!(
+        ports.contains(&5432) && ports.contains(&6379),
+        "both services observed: {ports:?}"
+    );
 
     // World synthesis proposes real service cells for classified protocols.
     assert_eq!(manifest["world"]["status"], "proposed");
     let dependencies = manifest["world"]["dependencies"].as_array().unwrap();
-    assert!(dependencies
-        .iter()
-        .any(|d| d["treatment"].as_str().unwrap().contains("service-pack:postgres")));
-    assert!(dependencies
-        .iter()
-        .any(|d| d["treatment"].as_str().unwrap().contains("service-pack:redis")));
+    assert!(dependencies.iter().any(|d| d["treatment"]
+        .as_str()
+        .unwrap()
+        .contains("service-pack:postgres")));
+    assert!(dependencies.iter().any(|d| d["treatment"]
+        .as_str()
+        .unwrap()
+        .contains("service-pack:redis")));
 
     // Lock + compose written; compose contains the postgres image.
     assert!(out.join("world.lock.yaml").exists());
     let compose = std::fs::read_to_string(out.join("compose.yaml")).unwrap();
-    assert!(compose.contains("postgres@sha256"), "compose must pin service images: {compose}");
+    assert!(
+        compose.contains("postgres@sha256"),
+        "compose must pin service images: {compose}"
+    );
 
     // World export via CLI.
-    let (ok, compose_out, _) =
-        run_ovid(&["world", "export", "--from", out.to_str().unwrap(), "--format", "compose"]);
+    let (ok, compose_out, _) = run_ovid(&[
+        "world",
+        "export",
+        "--from",
+        out.to_str().unwrap(),
+        "--format",
+        "compose",
+    ]);
     assert!(ok);
     assert!(compose_out.contains("postgres"));
 }
@@ -257,7 +304,10 @@ fn timeout_kills_workload_and_reports_failure() {
         out.to_str().unwrap(),
     ]);
     assert!(ok, "CLI itself should succeed; the workload fails");
-    assert!(start.elapsed() < std::time::Duration::from_secs(60), "deadline must be enforced");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(60),
+        "deadline must be enforced"
+    );
     let manifest = load_manifest(&out);
     assert_eq!(manifest["workloads"][0]["status"], "failed", "{stdout}");
 }
@@ -306,11 +356,14 @@ fn diff_detects_component_changes() {
 fn explain_returns_evidence_backed_claims() {
     let out = temp_out("explain");
     let fixture = fixtures().join("node-app");
-    let (ok, _, _) =
-        run_ovid(&["inventory", fixture.to_str().unwrap(), "--out", out.to_str().unwrap()]);
+    let (ok, _, _) = run_ovid(&[
+        "inventory",
+        fixture.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
     assert!(ok);
-    let (ok, stdout, stderr) =
-        run_ovid(&["explain", "express", "--from", out.to_str().unwrap()]);
+    let (ok, stdout, stderr) = run_ovid(&["explain", "express", "--from", out.to_str().unwrap()]);
     assert!(ok, "explain failed: {stderr}");
     // Each printed explanation is a JSON document with resolved evidence.
     assert!(stdout.contains("supporting_evidence"), "{stdout}");
@@ -363,7 +416,11 @@ fn counterfactual_env_classifies_required_variable() {
         ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();
     assert!(
         ledger_text.contains("remove-env:OVID_IT_MODE") && ledger_text.contains("\"required\""),

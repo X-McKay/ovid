@@ -79,8 +79,12 @@ fn mine_github_actions(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
         .cloned()
         .collect();
     for path in workflow_files {
-        let Ok(text) = snapshot.read_file(&path, MAX_DOC_BYTES) else { continue };
-        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { continue };
+        let Ok(text) = snapshot.read_file(&path, MAX_DOC_BYTES) else {
+            continue;
+        };
+        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+            continue;
+        };
         let mut runs = Vec::new();
         collect_run_values(&value, &mut runs);
         for script in runs {
@@ -126,9 +130,15 @@ fn mine_package_scripts(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
         if path.contains("node_modules/") {
             continue;
         }
-        let Ok(text) = snapshot.read_file(path, MAX_DOC_BYTES) else { continue };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        let Some(scripts) = value.get("scripts").and_then(|s| s.as_object()) else { continue };
+        let Ok(text) = snapshot.read_file(path, MAX_DOC_BYTES) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(scripts) = value.get("scripts").and_then(|s| s.as_object()) else {
+            continue;
+        };
         for (name, _) in scripts {
             let kind_hint = match name.as_str() {
                 "test" => Some(ActionKind::Test),
@@ -155,10 +165,14 @@ fn mine_package_scripts(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
 fn mine_makefiles(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
     for name in ["Makefile", "makefile", "GNUmakefile", "justfile"] {
         for path in snapshot.find_files_named(name) {
-            let Ok(text) = snapshot.read_file(path, MAX_DOC_BYTES) else { continue };
+            let Ok(text) = snapshot.read_file(path, MAX_DOC_BYTES) else {
+                continue;
+            };
             let runner = if name == "justfile" { "just" } else { "make" };
             for line in text.lines() {
-                let Some((target, _)) = line.split_once(':') else { continue };
+                let Some((target, _)) = line.split_once(':') else {
+                    continue;
+                };
                 let target = target.trim();
                 if line.starts_with(['\t', ' ', '.', '#']) || target.contains(['=', '$', ' ']) {
                     continue;
@@ -184,7 +198,9 @@ fn mine_makefiles(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
 /// Dockerfiles: ENTRYPOINT/CMD as start candidates (container metadata).
 fn mine_dockerfiles(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
     for path in snapshot.find_files_named("Dockerfile") {
-        let Ok(text) = snapshot.read_file(path, MAX_DOC_BYTES) else { continue };
+        let Ok(text) = snapshot.read_file(path, MAX_DOC_BYTES) else {
+            continue;
+        };
         for line in text.lines() {
             let line = line.trim();
             let Some(rest) = line
@@ -224,7 +240,9 @@ fn mine_docs(snapshot: &RepoSnapshot, out: &mut Vec<MinedCommand>) {
         .cloned()
         .collect();
     for path in doc_files {
-        let Ok(text) = snapshot.read_file(&path, MAX_DOC_BYTES) else { continue };
+        let Ok(text) = snapshot.read_file(&path, MAX_DOC_BYTES) else {
+            continue;
+        };
         let mut in_shell_block = false;
         for line in text.lines() {
             if let Some(fence) = line.trim().strip_prefix("```") {

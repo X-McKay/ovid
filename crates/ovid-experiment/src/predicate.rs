@@ -9,11 +9,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SuccessPredicate {
-    ExitCode { expected: i32 },
+    ExitCode {
+        expected: i32,
+    },
     /// Exit code AND a marker in combined output (e.g. `test result: ok`).
-    OutputContains { expected_exit: i32, needle: String },
+    OutputContains {
+        expected_exit: i32,
+        needle: String,
+    },
     /// A file exists in the workspace after the run.
-    ArtifactExists { path: String },
+    ArtifactExists {
+        path: String,
+    },
 }
 
 impl SuccessPredicate {
@@ -25,9 +32,10 @@ impl SuccessPredicate {
     ) -> bool {
         match self {
             SuccessPredicate::ExitCode { expected } => exit_code == Some(*expected),
-            SuccessPredicate::OutputContains { expected_exit, needle } => {
-                exit_code == Some(*expected_exit) && combined_output.contains(needle)
-            }
+            SuccessPredicate::OutputContains {
+                expected_exit,
+                needle,
+            } => exit_code == Some(*expected_exit) && combined_output.contains(needle),
             SuccessPredicate::ArtifactExists { path } => workspace.join(path).exists(),
         }
     }
@@ -36,7 +44,10 @@ impl SuccessPredicate {
     pub fn describe(&self) -> String {
         match self {
             SuccessPredicate::ExitCode { expected } => format!("exit-code == {expected}"),
-            SuccessPredicate::OutputContains { expected_exit, needle } => {
+            SuccessPredicate::OutputContains {
+                expected_exit,
+                needle,
+            } => {
                 format!("exit-code == {expected_exit} and output contains {needle:?}")
             }
             SuccessPredicate::ArtifactExists { path } => format!("artifact exists: {path}"),
@@ -54,7 +65,10 @@ mod tests {
         let predicate = SuccessPredicate::ExitCode { expected: 0 };
         assert!(predicate.evaluate(Some(0), "", Path::new("/tmp")));
         assert!(!predicate.evaluate(Some(1), "", Path::new("/tmp")));
-        assert!(!predicate.evaluate(None, "", Path::new("/tmp")), "signal death is not success");
+        assert!(
+            !predicate.evaluate(None, "", Path::new("/tmp")),
+            "signal death is not success"
+        );
     }
 
     #[test]
@@ -73,8 +87,13 @@ mod tests {
         let dir = std::env::temp_dir().join("ovid-predicate-test");
         std::fs::create_dir_all(dir.join("target")).unwrap();
         std::fs::write(dir.join("target/app"), "bin").unwrap();
-        let predicate = SuccessPredicate::ArtifactExists { path: "target/app".into() };
-        assert!(predicate.evaluate(Some(1), "", &dir), "artifact predicate ignores exit code");
+        let predicate = SuccessPredicate::ArtifactExists {
+            path: "target/app".into(),
+        };
+        assert!(
+            predicate.evaluate(Some(1), "", &dir),
+            "artifact predicate ignores exit code"
+        );
         assert!(!predicate.evaluate(Some(0), "", Path::new("/nonexistent")));
     }
 }

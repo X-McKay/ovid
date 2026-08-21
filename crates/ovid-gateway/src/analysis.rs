@@ -67,12 +67,19 @@ pub fn analyze_network(
 
     for envelope in events {
         match &envelope.event {
-            BoundaryEvent::SocketConnect { address, port, original_dns_name, result, .. } => {
+            BoundaryEvent::SocketConnect {
+                address,
+                port,
+                original_dns_name,
+                result,
+                ..
+            } => {
                 if *port == 53 {
                     continue; // resolver traffic, not an application dependency
                 }
-                let entry = destinations.entry((address.clone(), *port)).or_insert_with(|| {
-                    ExternalObservation {
+                let entry = destinations
+                    .entry((address.clone(), *port))
+                    .or_insert_with(|| ExternalObservation {
                         address: address.clone(),
                         port: *port,
                         dns_name: original_dns_name
@@ -84,8 +91,7 @@ pub fn analyze_network(
                         failures: 0,
                         outcomes: Vec::new(),
                         evidence: Vec::new(),
-                    }
-                });
+                    });
                 entry.attempts += 1;
                 if envelope.event.is_failure() {
                     entry.failures += 1;
@@ -98,9 +104,13 @@ pub fn analyze_network(
                 entry.evidence.push(envelope.event_id.clone());
             }
             BoundaryEvent::SocketListening { address, port } => {
-                let entry = listeners.entry((address.clone(), *port)).or_insert_with(|| {
-                    Listener { address: address.clone(), port: *port, evidence: Vec::new() }
-                });
+                let entry = listeners
+                    .entry((address.clone(), *port))
+                    .or_insert_with(|| Listener {
+                        address: address.clone(),
+                        port: *port,
+                        evidence: Vec::new(),
+                    });
                 entry.evidence.push(envelope.event_id.clone());
             }
             BoundaryEvent::UnixSocketConnected { path, .. } => {
@@ -122,7 +132,11 @@ pub fn analyze_network(
         }
     }
 
-    NetworkAnalysis { external, listeners: listeners.into_values().collect(), unix_sockets }
+    NetworkAnalysis {
+        external,
+        listeners: listeners.into_values().collect(),
+        unix_sockets,
+    }
 }
 
 #[cfg(test)]
@@ -158,7 +172,13 @@ mod tests {
         let events = vec![
             envelope(&ids, connect("ECONNREFUSED")),
             envelope(&ids, connect("ECONNREFUSED")),
-            envelope(&ids, BoundaryEvent::SocketListening { address: "0.0.0.0".into(), port: 8080 }),
+            envelope(
+                &ids,
+                BoundaryEvent::SocketListening {
+                    address: "0.0.0.0".into(),
+                    port: 8080,
+                },
+            ),
         ];
         let mut dns = BTreeMap::new();
         dns.insert("10.203.17.201".to_string(), "orders-db".to_string());
@@ -190,7 +210,10 @@ mod tests {
             },
         )];
         let analysis = analyze_network(&events, &registry, &BTreeMap::new());
-        assert_eq!(analysis.external[0].protocol, None, "unknown must stay unresolved (FR-048)");
+        assert_eq!(
+            analysis.external[0].protocol, None,
+            "unknown must stay unresolved (FR-048)"
+        );
         assert!(!analysis.external[0].all_failed());
     }
 

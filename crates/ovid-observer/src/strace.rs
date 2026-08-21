@@ -47,8 +47,8 @@ impl BoundaryObserver for StraceObserver {
     fn wrap(&self, argv: &[String], output_path: &Path) -> Vec<String> {
         let mut wrapped = vec![
             "strace".to_string(),
-            "-f".to_string(),   // follow children: the process tree is the unit
-            "-qq".to_string(),  // suppress attach/exit noise
+            "-f".to_string(),  // follow children: the process tree is the unit
+            "-qq".to_string(), // suppress attach/exit noise
             "-s".to_string(),
             "256".to_string(),
             "-o".to_string(),
@@ -154,7 +154,9 @@ impl Parser {
         let Some((pid_text, rest)) = raw.split_once(char::is_whitespace) else {
             return LineOutcome::Unparsed;
         };
-        let Ok(pid) = pid_text.parse::<u32>() else { return LineOutcome::Unparsed };
+        let Ok(pid) = pid_text.parse::<u32>() else {
+            return LineOutcome::Unparsed;
+        };
         let rest = rest.trim_start();
 
         // Stitch unfinished/resumed pairs.
@@ -181,12 +183,21 @@ impl Parser {
 
         if let Some(caps) = r.exited.captures(rest) {
             let code: i32 = caps[1].parse().unwrap_or(-1);
-            return LineOutcome::Event(pid, BoundaryEvent::ProcessExited { exit_code: code, signal: None });
+            return LineOutcome::Event(
+                pid,
+                BoundaryEvent::ProcessExited {
+                    exit_code: code,
+                    signal: None,
+                },
+            );
         }
         if r.killed.captures(rest).is_some() {
             return LineOutcome::Event(
                 pid,
-                BoundaryEvent::ProcessExited { exit_code: -1, signal: Some(9) },
+                BoundaryEvent::ProcessExited {
+                    exit_code: -1,
+                    signal: Some(9),
+                },
             );
         }
         if rest.starts_with("---") {
@@ -197,7 +208,11 @@ impl Parser {
             let path = caps[1].to_string();
             let argv = parse_argv_list(&caps[2]);
             let code: i64 = caps[3].parse().unwrap_or(0);
-            let errno = if code < 0 { caps.get(4).map(|m| m.as_str().to_string()) } else { None };
+            let errno = if code < 0 {
+                caps.get(4).map(|m| m.as_str().to_string())
+            } else {
+                None
+            };
             if errno.is_none() {
                 self.executables.insert(pid, path.clone());
             }
@@ -208,8 +223,13 @@ impl Parser {
             let path = caps[1].to_string();
             let flags = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let code: i64 = caps[3].parse().unwrap_or(0);
-            let errno = if code < 0 { caps.get(4).map(|m| m.as_str().to_string()) } else { None };
-            let write = flags.contains("O_WRONLY") || flags.contains("O_RDWR") || flags.contains("O_CREAT");
+            let errno = if code < 0 {
+                caps.get(4).map(|m| m.as_str().to_string())
+            } else {
+                None
+            };
+            let write =
+                flags.contains("O_WRONLY") || flags.contains("O_RDWR") || flags.contains("O_CREAT");
             if errno.is_none() && !write && is_shared_object(&path) {
                 return LineOutcome::Event(pid, BoundaryEvent::SharedObjectMapped { path });
             }
@@ -317,8 +337,11 @@ impl Parser {
         match r.result.captures(rest) {
             Some(caps) => {
                 let code: i64 = caps[1].parse().unwrap_or(0);
-                let errno =
-                    if code < 0 { caps.get(2).map(|m| m.as_str().to_string()) } else { None };
+                let errno = if code < 0 {
+                    caps.get(2).map(|m| m.as_str().to_string())
+                } else {
+                    None
+                };
                 (code, errno)
             }
             None => (0, None),
@@ -343,7 +366,9 @@ fn parse_argv_list(list: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut rest = list;
     while let Some(start) = rest.find('"') {
-        let Some(end) = rest[start + 1..].find('"') else { break };
+        let Some(end) = rest[start + 1..].find('"') else {
+            break;
+        };
         args.push(rest[start + 1..start + 1 + end].to_string());
         rest = &rest[start + 2 + end..];
     }
@@ -416,7 +441,12 @@ mod tests {
             "200   connect(5, {sa_family=AF_INET6, sin6_port=htons(443), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, \"::1\", &sin6_addr), sin6_scope_id=0}, 28) = 0\n",
         ));
         match &report.events[0].event {
-            BoundaryEvent::SocketConnect { address, port, result, .. } => {
+            BoundaryEvent::SocketConnect {
+                address,
+                port,
+                result,
+                ..
+            } => {
                 assert_eq!(address, "127.0.0.1");
                 assert_eq!(*port, 5432);
                 assert_eq!(result.as_deref(), Some("ECONNREFUSED"));
@@ -492,11 +522,17 @@ mod tests {
         let report = collect_from("500   +++ exited with 3 +++\n501   +++ killed by SIGKILL +++\n");
         assert!(matches!(
             &report.events[0].event,
-            BoundaryEvent::ProcessExited { exit_code: 3, signal: None }
+            BoundaryEvent::ProcessExited {
+                exit_code: 3,
+                signal: None
+            }
         ));
         assert!(matches!(
             &report.events[1].event,
-            BoundaryEvent::ProcessExited { signal: Some(9), .. }
+            BoundaryEvent::ProcessExited {
+                signal: Some(9),
+                ..
+            }
         ));
     }
 
@@ -514,7 +550,9 @@ mod tests {
         let wrapped = StraceObserver.wrap(&argv, Path::new("/tmp/out.trace"));
         assert_eq!(wrapped[0], "strace");
         assert!(wrapped.contains(&"-f".to_string()));
-        assert!(wrapped.windows(2).any(|w| w[0] == "-o" && w[1] == "/tmp/out.trace"));
+        assert!(wrapped
+            .windows(2)
+            .any(|w| w[0] == "-o" && w[1] == "/tmp/out.trace"));
         assert_eq!(&wrapped[wrapped.len() - 2..], &["cargo", "test"]);
     }
 }

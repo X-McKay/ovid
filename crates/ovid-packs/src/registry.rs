@@ -1,6 +1,8 @@
 //! Pack registry: embedded builtins plus directory loading.
 
-use crate::schema::{Pack, PackBody, ProtocolPack, ResolverCandidate, RunnerRecipe, ServicePack, ToolResolverPack};
+use crate::schema::{
+    Pack, PackBody, ProtocolPack, ResolverCandidate, RunnerRecipe, ServicePack, ToolResolverPack,
+};
 use ovid_core::OvidError;
 use ovid_repository::RepoSnapshot;
 use std::path::Path;
@@ -67,8 +69,8 @@ impl PackRegistry {
             if document.is_empty() || document.lines().all(|l| l.trim_start().starts_with('#')) {
                 continue;
             }
-            let pack = Pack::parse(document)
-                .map_err(|e| OvidError::Pack(format!("{origin}: {e}")))?;
+            let pack =
+                Pack::parse(document).map_err(|e| OvidError::Pack(format!("{origin}: {e}")))?;
             self.packs.push(pack);
             count += 1;
         }
@@ -127,7 +129,10 @@ impl PackRegistry {
             }
         }
         matches.sort_by_key(|(priority, pack, _)| (*priority, pack.metadata.name.clone()));
-        matches.into_iter().map(|(_, pack, recipe)| (pack, recipe)).collect()
+        matches
+            .into_iter()
+            .map(|(_, pack, recipe)| (pack, recipe))
+            .collect()
     }
 
     /// Resolve a missing executable to trusted candidates (§15.3).
@@ -138,7 +143,10 @@ impl PackRegistry {
     /// Resolve a missing file by path suffix.
     pub fn resolve_file(&self, path: &str) -> Vec<&ResolverCandidate> {
         self.resolver_lookup(|r| {
-            r.files.iter().find(|(suffix, _)| path.ends_with(suffix.as_str())).map(|(_, v)| v)
+            r.files
+                .iter()
+                .find(|(suffix, _)| path.ends_with(suffix.as_str()))
+                .map(|(_, v)| v)
         })
     }
 
@@ -155,14 +163,22 @@ impl PackRegistry {
             })
             .flatten()
             .collect();
-        out.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out
     }
 
     /// Classify a destination by port and optional first bytes. Returns the
     /// protocol system name and the pack that matched. First-byte matches
     /// outrank port-only matches (§24.2: port alone carries little weight).
-    pub fn classify_protocol(&self, port: u16, first_bytes: Option<&[u8]>) -> Option<(&Pack, &ProtocolPack)> {
+    pub fn classify_protocol(
+        &self,
+        port: u16,
+        first_bytes: Option<&[u8]>,
+    ) -> Option<(&Pack, &ProtocolPack)> {
         let mut best: Option<(u8, &Pack, &ProtocolPack)> = None;
         for (pack, protocol) in self.protocol_packs() {
             let port_hit = protocol.matcher.ports.contains(&port);
@@ -247,7 +263,9 @@ mod tests {
         let registry = PackRegistry::builtin().unwrap();
         // Redis RESP bytes on a non-standard port beat the port-only HTTP
         // match on 8080.
-        let (_, protocol) = registry.classify_protocol(8080, Some(b"*1\r\n$4\r\nPING\r\n")).unwrap();
+        let (_, protocol) = registry
+            .classify_protocol(8080, Some(b"*1\r\n$4\r\nPING\r\n"))
+            .unwrap();
         assert_eq!(protocol.system, "redis");
         let (_, protocol) = registry.classify_protocol(5432, None).unwrap();
         assert_eq!(protocol.system, "postgresql");
@@ -257,7 +275,11 @@ mod tests {
     #[test]
     fn external_dir_load_rejects_broken_pack() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("bad.yaml"), "api_version: nope\nkind: runner-recipe\nmetadata: {name: x}\ndetect: {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("bad.yaml"),
+            "api_version: nope\nkind: runner-recipe\nmetadata: {name: x}\ndetect: {}\n",
+        )
+        .unwrap();
         let mut registry = PackRegistry::builtin().unwrap();
         assert!(registry.load_dir(dir.path()).is_err());
     }

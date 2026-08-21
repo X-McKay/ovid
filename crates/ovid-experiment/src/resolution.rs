@@ -14,15 +14,34 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ResolutionKind {
     /// Install a missing executable via a trusted resolver candidate.
-    InstallTool { executable: String, package: String, provider: String },
+    InstallTool {
+        executable: String,
+        package: String,
+        provider: String,
+    },
     /// Provide a missing file via a trusted resolver candidate.
-    ProvideFile { path: String, package: String, provider: String },
+    ProvideFile {
+        path: String,
+        package: String,
+        provider: String,
+    },
     /// Start a recognized infrastructure service (§18.1 step 3).
-    StartService { dependency_id: String, pack: String, port: u16 },
+    StartService {
+        dependency_id: String,
+        pack: String,
+        port: u16,
+    },
     /// Supply a minimal protocol stub (§18.1 step 5).
-    SupplyStub { dependency_id: String, protocol: String, port: u16 },
+    SupplyStub {
+        dependency_id: String,
+        protocol: String,
+        port: u16,
+    },
     /// Leave unresolved — preserved explicitly (§18.1 step 7, FR-048).
-    LeaveUnresolved { dependency_id: String, reason: String },
+    LeaveUnresolved {
+        dependency_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -62,7 +81,11 @@ pub fn propose_resolutions(
             // A failed exec is only a *missing tool* if no exec of the same
             // basename succeeded anywhere (PATH scans produce many ENOENTs
             // before the successful hit).
-            BoundaryEvent::ProcessExec { path, errno: Some(errno), .. } if errno == "ENOENT" => {
+            BoundaryEvent::ProcessExec {
+                path,
+                errno: Some(errno),
+                ..
+            } if errno == "ENOENT" => {
                 let basename = path.rsplit('/').next().unwrap_or(path).to_string();
                 if seen_tools.contains(&basename) {
                     continue;
@@ -99,9 +122,11 @@ pub fn propose_resolutions(
                     }),
                 }
             }
-            BoundaryEvent::FileOpened { path, errno: Some(errno), .. }
-                if errno == "ENOENT" && !ignorable_missing_file(path) =>
-            {
+            BoundaryEvent::FileOpened {
+                path,
+                errno: Some(errno),
+                ..
+            } if errno == "ENOENT" && !ignorable_missing_file(path) => {
                 if !seen_files.insert(path.clone()) {
                     continue;
                 }
@@ -130,11 +155,19 @@ pub fn propose_resolutions(
     let mut scan_dirs: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         Default::default();
     for envelope in events {
-        if let BoundaryEvent::FileOpened { path, errno: Some(errno), .. } = &envelope.event {
+        if let BoundaryEvent::FileOpened {
+            path,
+            errno: Some(errno),
+            ..
+        } = &envelope.event
+        {
             if errno == "ENOENT" {
                 if let Some((dir, base)) = path.rsplit_once('/') {
                     if !base.is_empty() && !base.contains('.') {
-                        scan_dirs.entry(base.to_string()).or_default().insert(dir.to_string());
+                        scan_dirs
+                            .entry(base.to_string())
+                            .or_default()
+                            .insert(dir.to_string());
                     }
                 }
             }
@@ -190,7 +223,10 @@ pub fn propose_resolutions(
             .dns_name
             .clone()
             .unwrap_or_else(|| format!("{}:{}", observation.address, observation.port));
-        match (&observation.protocol, observation.service_candidates.first()) {
+        match (
+            &observation.protocol,
+            observation.service_candidates.first(),
+        ) {
             (Some(_), Some(pack)) => proposals.push(ResolutionProposal {
                 kind: ResolutionKind::StartService {
                     dependency_id,
@@ -220,7 +256,11 @@ pub fn propose_resolutions(
         }
     }
 
-    proposals.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    proposals.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     proposals
 }
 
@@ -264,7 +304,10 @@ mod tests {
             ResolutionKind::InstallTool { executable, package, .. }
                 if executable == "protoc" && package == "protobuf-compiler"
         ));
-        assert!(!proposals[0].evidence.is_empty(), "proposals must carry provenance");
+        assert!(
+            !proposals[0].evidence.is_empty(),
+            "proposals must carry provenance"
+        );
     }
 
     #[test]
@@ -292,19 +335,20 @@ mod tests {
         ];
         let network = analyze_network(&events, &registry, &BTreeMap::new());
         let proposals = propose_resolutions(&events, &network, &registry);
-        assert!(proposals.is_empty(), "resolved PATH scans must not propose installs: {proposals:?}");
+        assert!(
+            proposals.is_empty(),
+            "resolved PATH scans must not propose installs: {proposals:?}"
+        );
     }
 
     #[test]
     fn path_scan_stat_misses_propose_known_tool() {
         let ids = IdGenerator::deterministic();
         let registry = PackRegistry::builtin().unwrap();
-        let miss = |dir: &str| {
-            BoundaryEvent::FileOpened {
-                path: format!("{dir}/protoc"),
-                errno: Some("ENOENT".into()),
-                write: false,
-            }
+        let miss = |dir: &str| BoundaryEvent::FileOpened {
+            path: format!("{dir}/protoc"),
+            errno: Some("ENOENT".into()),
+            write: false,
         };
         let events = vec![
             envelope(&ids, miss("/usr/local/bin")),
@@ -353,7 +397,10 @@ mod tests {
         ];
         let network = analyze_network(&events, &registry, &BTreeMap::new());
         let proposals = propose_resolutions(&events, &network, &registry);
-        assert!(proposals.is_empty(), "found tool must not be proposed: {proposals:?}");
+        assert!(
+            proposals.is_empty(),
+            "found tool must not be proposed: {proposals:?}"
+        );
     }
 
     #[test]
@@ -380,7 +427,10 @@ mod tests {
         ];
         let network = analyze_network(&events, &registry, &BTreeMap::new());
         let proposals = propose_resolutions(&events, &network, &registry);
-        assert!(proposals.is_empty(), "unknown probes must not spam proposals: {proposals:?}");
+        assert!(
+            proposals.is_empty(),
+            "unknown probes must not spam proposals: {proposals:?}"
+        );
     }
 
     #[test]

@@ -27,8 +27,13 @@ use walkdir::WalkDir;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RepositorySource {
-    LocalPath { path: PathBuf },
-    GitUrl { url: String, reference: Option<String> },
+    LocalPath {
+        path: PathBuf,
+    },
+    GitUrl {
+        url: String,
+        reference: Option<String>,
+    },
 }
 
 impl RepositorySource {
@@ -37,9 +42,14 @@ impl RepositorySource {
     pub fn parse(locator: &str, reference: Option<String>) -> Self {
         let path = Path::new(locator);
         if path.exists() {
-            RepositorySource::LocalPath { path: path.to_path_buf() }
+            RepositorySource::LocalPath {
+                path: path.to_path_buf(),
+            }
         } else {
-            RepositorySource::GitUrl { url: locator.to_string(), reference }
+            RepositorySource::GitUrl {
+                url: locator.to_string(),
+                reference,
+            }
         }
     }
 
@@ -128,19 +138,32 @@ pub struct AcquireOptions {
 
 impl AcquireOptions {
     pub fn new(workdir: impl Into<PathBuf>) -> Self {
-        AcquireOptions { workdir: workdir.into(), depth: Some(1), max_hash_file_bytes: 32 * 1024 * 1024 }
+        AcquireOptions {
+            workdir: workdir.into(),
+            depth: Some(1),
+            max_hash_file_bytes: 32 * 1024 * 1024,
+        }
     }
 }
 
 /// Acquire and fingerprint a repository.
-pub fn acquire(source: &RepositorySource, options: &AcquireOptions) -> Result<RepoSnapshot, OvidError> {
+pub fn acquire(
+    source: &RepositorySource,
+    options: &AcquireOptions,
+) -> Result<RepoSnapshot, OvidError> {
     match source {
         RepositorySource::LocalPath { path } => {
             let root = path
                 .canonicalize()
                 .map_err(|e| OvidError::Repository(format!("bad path {}: {e}", path.display())))?;
             let revision = git_revision(&root).unwrap_or_else(|| "workdir".to_string());
-            fingerprint(format!("file://{}", root.display()), revision, None, &root, options)
+            fingerprint(
+                format!("file://{}", root.display()),
+                revision,
+                None,
+                &root,
+                options,
+            )
         }
         RepositorySource::GitUrl { url, reference } => {
             let clone_dir = clone_target_dir(&options.workdir, url, reference.as_deref());
@@ -150,7 +173,13 @@ pub fn acquire(source: &RepositorySource, options: &AcquireOptions) -> Result<Re
             let revision = git_revision(&clone_dir).ok_or_else(|| {
                 OvidError::Repository(format!("could not resolve a commit for {url}"))
             })?;
-            fingerprint(url.clone(), revision, reference.clone(), &clone_dir, options)
+            fingerprint(
+                url.clone(),
+                revision,
+                reference.clone(),
+                &clone_dir,
+                options,
+            )
         }
     }
 }
@@ -162,7 +191,12 @@ fn clone_target_dir(workdir: &Path, url: &str, reference: Option<&str>) -> PathB
     workdir.join("sources").join(&key.hex()[..24])
 }
 
-fn clone(url: &str, reference: Option<&str>, target: &Path, depth: Option<u32>) -> Result<(), OvidError> {
+fn clone(
+    url: &str,
+    reference: Option<&str>,
+    target: &Path,
+    depth: Option<u32>,
+) -> Result<(), OvidError> {
     std::fs::create_dir_all(target.parent().unwrap_or(Path::new(".")))?;
     let mut cmd = Command::new("git");
     // Acquisition must not execute repository-controlled code (§14.2):
@@ -177,7 +211,9 @@ fn clone(url: &str, reference: Option<&str>, target: &Path, depth: Option<u32>) 
         cmd.arg("--branch").arg(r);
     }
     cmd.arg(url).arg(target);
-    let output = cmd.output().map_err(|e| OvidError::Repository(format!("git clone: {e}")))?;
+    let output = cmd
+        .output()
+        .map_err(|e| OvidError::Repository(format!("git clone: {e}")))?;
     if !output.status.success() {
         return Err(OvidError::Repository(format!(
             "git clone failed for {url}: {}",
@@ -285,19 +321,29 @@ mod tests {
         make_tree(dir_b.path());
         let opts_a = AcquireOptions::new(dir_a.path().join(".work"));
         let opts_b = AcquireOptions::new(dir_b.path().join(".work"));
-        let snap_a =
-            acquire(&RepositorySource::parse(dir_a.path().to_str().unwrap(), None), &opts_a)
-                .unwrap();
-        let snap_b =
-            acquire(&RepositorySource::parse(dir_b.path().to_str().unwrap(), None), &opts_b)
-                .unwrap();
+        let snap_a = acquire(
+            &RepositorySource::parse(dir_a.path().to_str().unwrap(), None),
+            &opts_a,
+        )
+        .unwrap();
+        let snap_b = acquire(
+            &RepositorySource::parse(dir_b.path().to_str().unwrap(), None),
+            &opts_b,
+        )
+        .unwrap();
         // Identical content -> identical digest, regardless of location.
         assert_eq!(snap_a.source_digest, snap_b.source_digest);
 
-        std::fs::write(dir_b.path().join("src/main.rs"), "fn main() { changed(); }\n").unwrap();
-        let snap_c =
-            acquire(&RepositorySource::parse(dir_b.path().to_str().unwrap(), None), &opts_b)
-                .unwrap();
+        std::fs::write(
+            dir_b.path().join("src/main.rs"),
+            "fn main() { changed(); }\n",
+        )
+        .unwrap();
+        let snap_c = acquire(
+            &RepositorySource::parse(dir_b.path().to_str().unwrap(), None),
+            &opts_b,
+        )
+        .unwrap();
         assert_ne!(snap_a.source_digest, snap_c.source_digest);
     }
 
@@ -315,6 +361,9 @@ mod tests {
         let source = RepositorySource::parse(dir.path().to_str().unwrap(), None);
         let snapshot = acquire(&source, &AcquireOptions::new(dir.path().join(".work"))).unwrap();
         assert!(snapshot.read_file("Cargo.toml", 4).is_err());
-        assert!(snapshot.read_file("Cargo.toml", 4096).unwrap().contains("[package]"));
+        assert!(snapshot
+            .read_file("Cargo.toml", 4096)
+            .unwrap()
+            .contains("[package]"));
     }
 }

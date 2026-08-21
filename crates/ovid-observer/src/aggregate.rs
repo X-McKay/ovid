@@ -39,14 +39,25 @@ pub struct AggregatedEvents {
 fn signature(event: &BoundaryEvent) -> String {
     match event {
         BoundaryEvent::FileOpened { path, errno, write } => {
-            format!("file-opened|{path}|{}|{write}", errno.as_deref().unwrap_or("ok"))
+            format!(
+                "file-opened|{path}|{}|{write}",
+                errno.as_deref().unwrap_or("ok")
+            )
         }
         BoundaryEvent::SharedObjectMapped { path } => format!("so-mapped|{path}"),
         BoundaryEvent::ProcessExec { path, errno, .. } => {
             format!("exec|{path}|{}", errno.as_deref().unwrap_or("ok"))
         }
-        BoundaryEvent::SocketConnect { address, port, result, .. } => {
-            format!("connect|{address}|{port}|{}", result.as_deref().unwrap_or("?"))
+        BoundaryEvent::SocketConnect {
+            address,
+            port,
+            result,
+            ..
+        } => {
+            format!(
+                "connect|{address}|{port}|{}",
+                result.as_deref().unwrap_or("?")
+            )
         }
         BoundaryEvent::UnixSocketConnected { path, result } => {
             format!("unix-connect|{path}|{}", result.as_deref().unwrap_or("?"))
@@ -93,7 +104,12 @@ pub fn aggregate(input: Vec<EventEnvelope>) -> AggregatedEvents {
         }
     }
     let collapsed = seen.into_iter().filter(|(_, count)| *count > 0).collect();
-    AggregatedEvents { events, collapsed, noise_dropped, input_count }
+    AggregatedEvents {
+        events,
+        collapsed,
+        noise_dropped,
+        input_count,
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +126,11 @@ mod tests {
             provider: "test".into(),
             provider_version: "0".into(),
             trust_tier: TrustTier::T2,
-            process: Some(ProcessIdentity { pid: 1, parent_pid: None, executable: None }),
+            process: Some(ProcessIdentity {
+                pid: 1,
+                parent_pid: None,
+                executable: None,
+            }),
             event,
         }
     }
@@ -148,7 +168,11 @@ mod tests {
         let input = vec![
             envelope(
                 &ids,
-                BoundaryEvent::FileOpened { path: "/proc/self/stat".into(), errno: None, write: false },
+                BoundaryEvent::FileOpened {
+                    path: "/proc/self/stat".into(),
+                    errno: None,
+                    write: false,
+                },
             ),
             // A *failed* open under /proc still survives.
             envelope(
@@ -170,8 +194,20 @@ mod tests {
     fn state_transitions_never_collapse() {
         let ids = IdGenerator::deterministic();
         let input = vec![
-            envelope(&ids, BoundaryEvent::ProcessExited { exit_code: 0, signal: None }),
-            envelope(&ids, BoundaryEvent::ProcessExited { exit_code: 0, signal: None }),
+            envelope(
+                &ids,
+                BoundaryEvent::ProcessExited {
+                    exit_code: 0,
+                    signal: None,
+                },
+            ),
+            envelope(
+                &ids,
+                BoundaryEvent::ProcessExited {
+                    exit_code: 0,
+                    signal: None,
+                },
+            ),
         ];
         let result = aggregate(input);
         assert_eq!(result.events.len(), 2);

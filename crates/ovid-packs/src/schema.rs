@@ -287,7 +287,9 @@ required_tools: [cargo]
         let pack = Pack::parse(yaml).unwrap();
         assert_eq!(pack.kind_label(), "runner-recipe");
         assert_eq!(pack.label(), "rust@0.1.0");
-        let PackBody::RunnerRecipe(recipe) = &pack.body else { panic!("wrong kind") };
+        let PackBody::RunnerRecipe(recipe) = &pack.body else {
+            panic!("wrong kind")
+        };
         assert_eq!(recipe.detect.any_files, vec!["Cargo.toml"]);
         assert_eq!(recipe.commands.test[0][0], "cargo");
     }

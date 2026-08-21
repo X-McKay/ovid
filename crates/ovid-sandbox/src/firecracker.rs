@@ -28,7 +28,11 @@ pub struct MachineConfig {
 
 impl Default for MachineConfig {
     fn default() -> Self {
-        MachineConfig { vcpu_count: 2, mem_size_mib: 2048, smt: false }
+        MachineConfig {
+            vcpu_count: 2,
+            mem_size_mib: 2048,
+            smt: false,
+        }
     }
 }
 
@@ -200,7 +204,10 @@ impl VmSpec {
     }
 
     /// Snapshot-create request pair (§16.6): pause, then snapshot.
-    pub fn snapshot_requests(&self, snapshot_dir: &Path) -> Vec<(String, String, serde_json::Value)> {
+    pub fn snapshot_requests(
+        &self,
+        snapshot_dir: &Path,
+    ) -> Vec<(String, String, serde_json::Value)> {
         vec![
             (
                 "PATCH".to_string(),
@@ -296,7 +303,10 @@ mod tests {
         assert_eq!(ids, ["rootfs", "source", "overlay", "output"]);
         // Immutability rules: rootfs and source read-only; overlay writable.
         assert!(drives[0].is_read_only && drives[0].is_root_device);
-        assert!(drives[1].is_read_only, "source must attach read-only (FR-023)");
+        assert!(
+            drives[1].is_read_only,
+            "source must attach read-only (FR-023)"
+        );
         assert!(!drives[2].is_read_only);
     }
 
@@ -356,7 +366,9 @@ mod tests {
         };
         let spec = RunSpec::new(
             vec!["true".into()],
-            crate::WorkspaceMode::InPlace { root: "/tmp".into() },
+            crate::WorkspaceMode::InPlace {
+                root: "/tmp".into(),
+            },
         );
         match backend.run(&spec) {
             Err(OvidError::UnsupportedHost(message)) => {

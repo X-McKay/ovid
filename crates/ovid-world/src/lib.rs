@@ -173,7 +173,11 @@ impl WorldLock {
     /// Build a lock from a world + workload. Services start before the
     /// target; unresolved/absent dependencies are excluded from startup but
     /// unresolved ones remain visible as cells so nothing is hidden.
-    pub fn from_world(world: &World, workload_command: Vec<String>, success: SuccessSpec) -> WorldLock {
+    pub fn from_world(
+        world: &World,
+        workload_command: Vec<String>,
+        success: SuccessSpec,
+    ) -> WorldLock {
         let digest = world.digest();
         let mut cells = Vec::new();
         let mut startup = Vec::new();
@@ -258,10 +262,17 @@ impl WorldLock {
                 digest,
             },
             policy,
-            network: WorldNetwork { cidr: "10.203.0.0/24".into(), dns },
+            network: WorldNetwork {
+                cidr: "10.203.0.0/24".into(),
+                dns,
+            },
             cells,
             startup_order: startup,
-            workload: WorkloadSpec { cell: "target".into(), command: workload_command, success },
+            workload: WorkloadSpec {
+                cell: "target".into(),
+                command: workload_command,
+                success,
+            },
             status: WorldStatus::Proposed,
         }
     }
@@ -320,7 +331,10 @@ mod tests {
     use super::*;
 
     fn world_with_postgres() -> World {
-        let mut world = World { target: "checkout".into(), ..Default::default() };
+        let mut world = World {
+            target: "checkout".into(),
+            ..Default::default()
+        };
         world.dependencies.push(WorldDependency {
             id: "orders-db".into(),
             treatment: Treatment::RealService {
@@ -339,7 +353,9 @@ mod tests {
         let mut a = world_with_postgres();
         a.dependencies.push(WorldDependency {
             id: "cache".into(),
-            treatment: Treatment::Stub { protocol: "redis".into() },
+            treatment: Treatment::Stub {
+                protocol: "redis".into(),
+            },
             aliases: vec![],
             port: None,
             environment: BTreeMap::new(),
@@ -356,7 +372,10 @@ mod tests {
         let world = world_with_postgres();
         let derived = world.with_treatment("orders-db", Treatment::Absent);
         assert_eq!(derived.dependencies.len(), 1);
-        assert_eq!(derived.dependency("orders-db").unwrap().treatment, Treatment::Absent);
+        assert_eq!(
+            derived.dependency("orders-db").unwrap().treatment,
+            Treatment::Absent
+        );
         // Original untouched.
         assert!(matches!(
             world.dependency("orders-db").unwrap().treatment,
@@ -372,7 +391,10 @@ mod tests {
             vec!["cargo".into(), "test".into()],
             SuccessSpec::ExitCode { expected: 0 },
         );
-        assert_eq!(lock.startup_order.last().map(String::as_str), Some("target"));
+        assert_eq!(
+            lock.startup_order.last().map(String::as_str),
+            Some("target")
+        );
         assert_eq!(lock.startup_order[0], "orders-db");
         assert!(lock.network.dns.contains_key("postgres"));
         assert_eq!(lock.status, WorldStatus::Proposed);
@@ -384,7 +406,9 @@ mod tests {
         let mut world = world_with_postgres();
         world.dependencies.push(WorldDependency {
             id: "telemetry".into(),
-            treatment: Treatment::Unresolved { reason: "certificate-pinned".into() },
+            treatment: Treatment::Unresolved {
+                reason: "certificate-pinned".into(),
+            },
             aliases: vec![],
             port: Some(8443),
             environment: BTreeMap::new(),
@@ -394,7 +418,10 @@ mod tests {
             vec!["make".into(), "test".into()],
             SuccessSpec::ExitCode { expected: 0 },
         );
-        assert!(lock.cells.iter().any(|c| c.id == "telemetry" && c.kind == "unresolved"));
+        assert!(lock
+            .cells
+            .iter()
+            .any(|c| c.id == "telemetry" && c.kind == "unresolved"));
         assert!(!lock.startup_order.contains(&"telemetry".to_string()));
     }
 

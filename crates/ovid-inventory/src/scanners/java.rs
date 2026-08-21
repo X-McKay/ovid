@@ -38,7 +38,13 @@ impl Scanner for JavaScanner {
     }
 }
 
-fn declared(group: &str, artifact: &str, version: Option<&str>, scope: Scope, source: &str) -> Component {
+fn declared(
+    group: &str,
+    artifact: &str,
+    version: Option<&str>,
+    scope: Scope,
+    source: &str,
+) -> Component {
     let name = format!("{group}:{artifact}");
     Component {
         purl: purl("maven", &name, version),
@@ -64,7 +70,9 @@ fn scan_pom(text: &str, source: &str, report: &mut InventoryReport) {
     let mut rest = text;
     let mut found = false;
     while let Some(start) = rest.find("<dependency>") {
-        let Some(end) = rest[start..].find("</dependency>") else { break };
+        let Some(end) = rest[start..].find("</dependency>") else {
+            break;
+        };
         let block = &rest[start..start + end];
         if let (Some(group), Some(artifact)) = (tag(block, "groupId"), tag(block, "artifactId")) {
             // Property placeholders like `${x.version}` are unresolved
@@ -76,14 +84,18 @@ fn scan_pom(text: &str, source: &str, report: &mut InventoryReport) {
                 _ => Scope::Runtime,
             };
             if !group.contains("${") && !artifact.contains("${") {
-                report.components.push(declared(group, artifact, version, scope, source));
+                report
+                    .components
+                    .push(declared(group, artifact, version, scope, source));
                 found = true;
             }
         }
         rest = &rest[start + end..];
     }
     if !found && text.contains("<dependencies>") {
-        report.warnings.push(format!("pom.xml at {source} had no extractable dependencies"));
+        report.warnings.push(format!(
+            "pom.xml at {source} had no extractable dependencies"
+        ));
     }
 }
 
@@ -105,7 +117,9 @@ fn scan_gradle(text: &str, source: &str, report: &mut InventoryReport) {
             "compileOnly" | "annotationProcessor" => Scope::Build,
             _ => Scope::Runtime,
         };
-        report.components.push(declared(&caps[2], &caps[3], Some(&caps[4]), scope, source));
+        report
+            .components
+            .push(declared(&caps[2], &caps[3], Some(&caps[4]), scope, source));
     }
 }
 
@@ -145,18 +159,26 @@ mod tests {
         )
         .unwrap();
         let report = scan(&snapshot);
-        assert!(report
-            .components
-            .iter()
-            .any(|c| c.name == "org.postgresql:postgresql" && c.version.as_deref() == Some("42.7.3")));
+        assert!(report.components.iter().any(
+            |c| c.name == "org.postgresql:postgresql" && c.version.as_deref() == Some("42.7.3")
+        ));
         let junit = report
             .components
             .iter()
             .find(|c| c.name == "org.junit.jupiter:junit-jupiter")
             .unwrap();
-        assert!(junit.version.is_none(), "property placeholder must stay versionless");
+        assert!(
+            junit.version.is_none(),
+            "property placeholder must stay versionless"
+        );
         assert_eq!(junit.scope, crate::Scope::Dev);
-        assert!(report.components.iter().any(|c| c.name == "org.apache.kafka:kafka-clients"));
-        assert!(report.components.iter().any(|c| c.name == "org.mockito:mockito-core"));
+        assert!(report
+            .components
+            .iter()
+            .any(|c| c.name == "org.apache.kafka:kafka-clients"));
+        assert!(report
+            .components
+            .iter()
+            .any(|c| c.name == "org.mockito:mockito-core"));
     }
 }

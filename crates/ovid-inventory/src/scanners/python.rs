@@ -73,7 +73,9 @@ fn parse_requirement(line: &str) -> Option<(String, Option<String>)> {
     if name.is_empty() {
         return None;
     }
-    let rest = rest.trim_start_matches(|c: char| c == '[' || c == ']' || c.is_alphanumeric() || c == ',' || c == '-' || c == '_');
+    let rest = rest.trim_start_matches(|c: char| {
+        c == '[' || c == ']' || c.is_alphanumeric() || c == ',' || c == '-' || c == '_'
+    });
     // Only `==x.y.z` counts as a pin; ranges stay versionless (§6.3).
     let version = rest
         .trim()
@@ -85,14 +87,18 @@ fn parse_requirement(line: &str) -> Option<(String, Option<String>)> {
 fn scan_requirements(text: &str, source: &str, report: &mut InventoryReport) {
     for line in text.lines() {
         if let Some((name, version)) = parse_requirement(line) {
-            report.components.push(declared(&name, version.as_deref(), Scope::Runtime, source));
+            report
+                .components
+                .push(declared(&name, version.as_deref(), Scope::Runtime, source));
         }
     }
 }
 
 fn scan_pyproject(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = text.parse::<toml::Value>() else {
-        report.warnings.push(format!("unparseable pyproject.toml at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable pyproject.toml at {source}"));
         return;
     };
     // PEP 621: [project] dependencies / optional-dependencies.
@@ -100,19 +106,28 @@ fn scan_pyproject(text: &str, source: &str, report: &mut InventoryReport) {
         if let Some(deps) = project.get("dependencies").and_then(|d| d.as_array()) {
             for dep in deps.iter().filter_map(|d| d.as_str()) {
                 if let Some((name, version)) = parse_requirement(dep) {
-                    report
-                        .components
-                        .push(declared(&name, version.as_deref(), Scope::Runtime, source));
+                    report.components.push(declared(
+                        &name,
+                        version.as_deref(),
+                        Scope::Runtime,
+                        source,
+                    ));
                 }
             }
         }
-        if let Some(optional) = project.get("optional-dependencies").and_then(|d| d.as_table()) {
+        if let Some(optional) = project
+            .get("optional-dependencies")
+            .and_then(|d| d.as_table())
+        {
             for deps in optional.values().filter_map(|d| d.as_array()) {
                 for dep in deps.iter().filter_map(|d| d.as_str()) {
                     if let Some((name, version)) = parse_requirement(dep) {
-                        report
-                            .components
-                            .push(declared(&name, version.as_deref(), Scope::Dev, source));
+                        report.components.push(declared(
+                            &name,
+                            version.as_deref(),
+                            Scope::Dev,
+                            source,
+                        ));
                     }
                 }
             }
@@ -126,7 +141,9 @@ fn scan_pyproject(text: &str, source: &str, report: &mut InventoryReport) {
         .and_then(|d| d.as_table())
     {
         for name in deps.keys().filter(|n| n.as_str() != "python") {
-            report.components.push(declared(name, None, Scope::Runtime, source));
+            report
+                .components
+                .push(declared(name, None, Scope::Runtime, source));
         }
     }
 }
@@ -134,10 +151,14 @@ fn scan_pyproject(text: &str, source: &str, report: &mut InventoryReport) {
 /// poetry.lock and uv.lock share the `[[package]] name/version` TOML shape.
 fn scan_toml_lock(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = text.parse::<toml::Value>() else {
-        report.warnings.push(format!("unparseable lockfile at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable lockfile at {source}"));
         return;
     };
-    let Some(packages) = value.get("package").and_then(|p| p.as_array()) else { return };
+    let Some(packages) = value.get("package").and_then(|p| p.as_array()) else {
+        return;
+    };
     for package in packages {
         let (Some(name), Some(version)) = (
             package.get("name").and_then(|v| v.as_str()),
@@ -167,8 +188,14 @@ mod tests {
 
     #[test]
     fn requirement_parsing() {
-        assert_eq!(parse_requirement("requests==2.31.0"), Some(("requests".into(), Some("2.31.0".into()))));
-        assert_eq!(parse_requirement("flask>=2,<3"), Some(("flask".into(), None)));
+        assert_eq!(
+            parse_requirement("requests==2.31.0"),
+            Some(("requests".into(), Some("2.31.0".into())))
+        );
+        assert_eq!(
+            parse_requirement("flask>=2,<3"),
+            Some(("flask".into(), None))
+        );
         assert_eq!(
             parse_requirement("uvicorn[standard]==0.29.0 ; python_version >= '3.8'"),
             Some(("uvicorn".into(), Some("0.29.0".into())))
@@ -198,7 +225,10 @@ httpx = "^0.27"
         )
         .unwrap();
         let report = scan(&snapshot);
-        assert!(report.components.iter().any(|c| c.name == "fastapi" && c.version.is_none()));
+        assert!(report
+            .components
+            .iter()
+            .any(|c| c.name == "fastapi" && c.version.is_none()));
         assert!(report
             .components
             .iter()

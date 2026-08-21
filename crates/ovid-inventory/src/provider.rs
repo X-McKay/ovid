@@ -87,7 +87,10 @@ mod tests {
         assert_eq!(components.len(), 2);
         assert_eq!(components[0].ecosystem, "npm");
         assert!(components[0].states.resolved);
-        assert!(!components[0].states.loaded, "static provider must not set loaded");
+        assert!(
+            !components[0].states.loaded,
+            "static provider must not set loaded"
+        );
         assert_eq!(components[1].purl, "pkg:generic/mystery");
     }
 

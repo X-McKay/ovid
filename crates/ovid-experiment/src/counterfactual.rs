@@ -24,7 +24,10 @@ pub struct ExperimentBudget {
 
 impl Default for ExperimentBudget {
     fn default() -> Self {
-        ExperimentBudget { max_runs: 60, required_repeats: 2 }
+        ExperimentBudget {
+            max_runs: 60,
+            required_repeats: 2,
+        }
     }
 }
 
@@ -63,7 +66,11 @@ pub struct MvwSolver {
 
 impl MvwSolver {
     pub fn new(budget: ExperimentBudget) -> Self {
-        MvwSolver { budget, runs_used: 0, experiments: Vec::new() }
+        MvwSolver {
+            budget,
+            runs_used: 0,
+            experiments: Vec::new(),
+        }
     }
 
     fn run_once(
@@ -127,13 +134,11 @@ impl MvwSolver {
         let mut classifications: BTreeMap<String, CausalClassification> = BTreeMap::new();
 
         // 1. Stable baseline success is a precondition (§20.6).
-        let Some(baseline_outcome) =
-            self.run_stable(runner, baseline, baseline, "baseline")?
+        let Some(baseline_outcome) = self.run_stable(runner, baseline, baseline, "baseline")?
         else {
             // Nondeterministic baseline: no causal claims at all (FR-053).
             for dependency in &baseline.dependencies {
-                classifications
-                    .insert(dependency.id.clone(), CausalClassification::Unresolved);
+                classifications.insert(dependency.id.clone(), CausalClassification::Unresolved);
             }
             return Ok(SolverOutcome {
                 minimal_world: baseline.clone(),
@@ -152,7 +157,12 @@ impl MvwSolver {
         let candidate_ids: Vec<String> = baseline
             .dependencies
             .iter()
-            .filter(|d| !matches!(d.treatment, Treatment::Absent | Treatment::Unresolved { .. }))
+            .filter(|d| {
+                !matches!(
+                    d.treatment,
+                    Treatment::Absent | Treatment::Unresolved { .. }
+                )
+            })
             .map(|d| d.id.clone())
             .collect();
 
@@ -164,9 +174,7 @@ impl MvwSolver {
             for id in &candidate_ids {
                 all_removed = all_removed.with_treatment(id, Treatment::Absent);
             }
-            if let Some(outcome) =
-                self.run_stable(runner, &all_removed, baseline, "remove-all")?
-            {
+            if let Some(outcome) = self.run_stable(runner, &all_removed, baseline, "remove-all")? {
                 if outcome.success {
                     for id in &candidate_ids {
                         classifications.insert(id.clone(), CausalClassification::Optional);
@@ -205,7 +213,9 @@ impl MvwSolver {
                 Err(OvidError::BudgetExhausted(_)) => {
                     // Budget ran out mid-minimization: remaining
                     // dependencies stay unresolved rather than guessed.
-                    classifications.entry(id.clone()).or_insert(CausalClassification::Unresolved);
+                    classifications
+                        .entry(id.clone())
+                        .or_insert(CausalClassification::Unresolved);
                 }
                 Err(other) => return Err(other),
             }
@@ -248,7 +258,9 @@ mod tests {
                 .iter()
                 .map(|id| WorldDependency {
                     id: id.to_string(),
-                    treatment: Treatment::Stub { protocol: "tcp".into() },
+                    treatment: Treatment::Stub {
+                        protocol: "tcp".into(),
+                    },
                     aliases: vec![id.to_string()],
                     port: None,
                     environment: Default::default(),
@@ -281,17 +293,34 @@ mod tests {
         let outcome = MvwSolver::new(ExperimentBudget::default())
             .minimize(&mut runner, &baseline)
             .unwrap();
-        assert_eq!(outcome.classifications["postgres"], CausalClassification::Required);
-        assert_eq!(outcome.classifications["telemetry"], CausalClassification::Optional);
-        assert_eq!(outcome.classifications["cache"], CausalClassification::Optional);
+        assert_eq!(
+            outcome.classifications["postgres"],
+            CausalClassification::Required
+        );
+        assert_eq!(
+            outcome.classifications["telemetry"],
+            CausalClassification::Optional
+        );
+        assert_eq!(
+            outcome.classifications["cache"],
+            CausalClassification::Optional
+        );
         assert!(!outcome.nondeterministic);
         // Minimal world keeps postgres, drops the rest.
         assert!(matches!(
-            outcome.minimal_world.dependency("postgres").unwrap().treatment,
+            outcome
+                .minimal_world
+                .dependency("postgres")
+                .unwrap()
+                .treatment,
             Treatment::Stub { .. }
         ));
         assert!(matches!(
-            outcome.minimal_world.dependency("telemetry").unwrap().treatment,
+            outcome
+                .minimal_world
+                .dependency("telemetry")
+                .unwrap()
+                .treatment,
             Treatment::Absent
         ));
     }
@@ -303,7 +332,10 @@ mod tests {
         let outcome = MvwSolver::new(ExperimentBudget::default())
             .minimize(&mut runner, &baseline)
             .unwrap();
-        assert!(outcome.classifications.values().all(|c| *c == CausalClassification::Optional));
+        assert!(outcome
+            .classifications
+            .values()
+            .all(|c| *c == CausalClassification::Optional));
         // Group phase: baseline (2) + remove-all (2) = 4 runs, no per-dep loop.
         assert_eq!(outcome.runs_used, 4);
     }
@@ -324,7 +356,10 @@ mod tests {
             .minimize(&mut runner, &baseline)
             .unwrap();
         assert!(outcome.nondeterministic);
-        assert_eq!(outcome.classifications["postgres"], CausalClassification::Unresolved);
+        assert_eq!(
+            outcome.classifications["postgres"],
+            CausalClassification::Unresolved
+        );
         assert_eq!(outcome.minimal_world.digest(), baseline.digest());
     }
 
@@ -333,9 +368,12 @@ mod tests {
         let baseline = world(&["a", "b", "c", "d", "e", "f"]);
         let mut runner = needs(&["a", "b", "c", "d", "e", "f"]);
         // Enough for baseline (2) + remove-all (2) + a couple of variants.
-        let outcome = MvwSolver::new(ExperimentBudget { max_runs: 8, required_repeats: 2 })
-            .minimize(&mut runner, &baseline)
-            .unwrap();
+        let outcome = MvwSolver::new(ExperimentBudget {
+            max_runs: 8,
+            required_repeats: 2,
+        })
+        .minimize(&mut runner, &baseline)
+        .unwrap();
         assert!(outcome
             .classifications
             .values()
@@ -358,8 +396,14 @@ mod tests {
         let outcome = MvwSolver::new(ExperimentBudget::default())
             .minimize(&mut runner, &baseline)
             .unwrap();
-        assert!(outcome.experiments.iter().any(|e| e.condition == "baseline"));
-        assert!(outcome.experiments.iter().any(|e| e.condition == "remove:postgres" && !e.success));
+        assert!(outcome
+            .experiments
+            .iter()
+            .any(|e| e.condition == "baseline"));
+        assert!(outcome
+            .experiments
+            .iter()
+            .any(|e| e.condition == "remove:postgres" && !e.success));
         for record in &outcome.experiments {
             assert!(record.world_digest.starts_with("sha256:"));
         }

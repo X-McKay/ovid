@@ -24,6 +24,6 @@ pub mod schema;
 
 pub use registry::PackRegistry;
 pub use schema::{
-    Pack, PackMetadata, ProtocolMatch, ProtocolPack, ResolverCandidate, RunnerRecipe,
-    ServicePack, ToolResolverPack,
+    Pack, PackMetadata, ProtocolMatch, ProtocolPack, ResolverCandidate, RunnerRecipe, ServicePack,
+    ToolResolverPack,
 };

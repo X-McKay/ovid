@@ -153,7 +153,13 @@ enum PacksCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Inventory { locator, reference, out, packs_dir, json } => {
+        Command::Inventory {
+            locator,
+            reference,
+            out,
+            packs_dir,
+            json,
+        } => {
             let bundle = pipeline::run_inventory(&locator, reference, &out, packs_dir.as_deref())?;
             if json {
                 println!("{}", bundle.manifest.to_json_pretty());
@@ -179,8 +185,14 @@ fn main() -> Result<()> {
                 timeout_seconds: timeout,
                 counterfactual_env: vec![],
             };
-            let bundle =
-                pipeline::run_observe(&locator, reference, &run, &out, &options, packs_dir.as_deref())?;
+            let bundle = pipeline::run_observe(
+                &locator,
+                reference,
+                &run,
+                &out,
+                &options,
+                packs_dir.as_deref(),
+            )?;
             if json {
                 println!("{}", bundle.manifest.to_json_pretty());
             } else {
@@ -207,8 +219,14 @@ fn main() -> Result<()> {
                 timeout_seconds: timeout,
                 counterfactual_env,
             };
-            let bundle =
-                pipeline::run_analyze(&locator, reference, &kinds, &out, &options, packs_dir.as_deref())?;
+            let bundle = pipeline::run_analyze(
+                &locator,
+                reference,
+                &kinds,
+                &out,
+                &options,
+                packs_dir.as_deref(),
+            )?;
             if json {
                 println!("{}", bundle.manifest.to_json_pretty());
             } else {
@@ -233,9 +251,17 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Diff { before, after, json } => {
+        Command::Diff {
+            before,
+            after,
+            json,
+        } => {
             let load = |path: &PathBuf| -> Result<ovid_output::Manifest> {
-                let file = if path.is_dir() { path.join("ovid.json") } else { path.clone() };
+                let file = if path.is_dir() {
+                    path.join("ovid.json")
+                } else {
+                    path.clone()
+                };
                 let text = std::fs::read_to_string(&file)
                     .with_context(|| format!("cannot read manifest {}", file.display()))?;
                 Ok(ovid_output::Manifest::from_json(&text)?)
@@ -259,8 +285,12 @@ fn main() -> Result<()> {
                     eprintln!("loaded {loaded} external pack(s) from {}", dir.display());
                 }
                 for pack in registry.all() {
-                    println!("{:<24} {:<20} {}", pack.label(), pack.kind_label(),
-                        pack.metadata.signer.as_deref().unwrap_or("unsigned"));
+                    println!(
+                        "{:<24} {:<20} {}",
+                        pack.label(),
+                        pack.kind_label(),
+                        pack.metadata.signer.as_deref().unwrap_or("unsigned")
+                    );
                 }
                 Ok(())
             }

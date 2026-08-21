@@ -37,7 +37,9 @@ impl Scanner for PhpScanner {
 
 fn scan_composer_json(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        report.warnings.push(format!("unparseable composer.json at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable composer.json at {source}"));
         return;
     };
     for (section, scope) in [("require", Scope::Runtime), ("require-dev", Scope::Dev)] {
@@ -65,7 +67,9 @@ fn scan_composer_json(text: &str, source: &str, report: &mut InventoryReport) {
 
 fn scan_composer_lock(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        report.warnings.push(format!("unparseable composer.lock at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable composer.lock at {source}"));
         return;
     };
     for section in ["packages", "packages-dev"] {
@@ -83,7 +87,11 @@ fn scan_composer_lock(text: &str, source: &str, report: &mut InventoryReport) {
                     version: Some(version.to_string()),
                     ecosystem: "composer".into(),
                     purl: purl("composer", name, Some(version)),
-                    scope: if section == "packages-dev" { Scope::Dev } else { Scope::Unknown },
+                    scope: if section == "packages-dev" {
+                        Scope::Dev
+                    } else {
+                        Scope::Unknown
+                    },
                     direct: false,
                     states: ClaimStates::default().with(ClaimState::Resolved),
                     source_file: source.to_string(),
@@ -123,6 +131,9 @@ mod tests {
             .find(|c| c.name == "monolog/monolog" && c.version.as_deref() == Some("3.6.0"))
             .unwrap();
         assert!(monolog.states.declared && monolog.states.resolved);
-        assert!(!report.components.iter().any(|c| c.name == "php" || c.name == "ext-json"));
+        assert!(!report
+            .components
+            .iter()
+            .any(|c| c.name == "php" || c.name == "ext-json"));
     }
 }

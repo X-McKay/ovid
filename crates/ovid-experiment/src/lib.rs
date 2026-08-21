@@ -45,11 +45,17 @@ pub struct RunOutcome {
 
 impl RunOutcome {
     pub fn passed() -> Self {
-        RunOutcome { success: true, failure_signature: None }
+        RunOutcome {
+            success: true,
+            failure_signature: None,
+        }
     }
 
     pub fn failed(signature: impl Into<String>) -> Self {
-        RunOutcome { success: false, failure_signature: Some(signature.into()) }
+        RunOutcome {
+            success: false,
+            failure_signature: Some(signature.into()),
+        }
     }
 }
 

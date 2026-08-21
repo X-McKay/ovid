@@ -93,7 +93,11 @@ mod tests {
     #[test]
     fn gemfile_and_lock() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Gemfile"), "source 'https://rubygems.org'\ngem 'rails', '~> 7.1'\ngem \"pg\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("Gemfile"),
+            "source 'https://rubygems.org'\ngem 'rails', '~> 7.1'\ngem \"pg\"\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.path().join("Gemfile.lock"),
             "GEM\n  remote: https://rubygems.org/\n  specs:\n    pg (1.5.6)\n    rails (7.1.3)\n      actionpack (= 7.1.3)\n",

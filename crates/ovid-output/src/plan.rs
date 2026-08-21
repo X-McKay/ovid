@@ -58,7 +58,10 @@ pub fn integration_plan_markdown(manifest: &Manifest, lock: Option<&WorldLock>) 
         for (index, cell) in lock.startup_order.iter().enumerate() {
             out.push_str(&format!("{}. {cell}\n", index + 1));
         }
-        out.push_str(&format!("\nWorld status: **{:?}** · digest `{}`\n\n", lock.status, lock.metadata.digest));
+        out.push_str(&format!(
+            "\nWorld status: **{:?}** · digest `{}`\n\n",
+            lock.status, lock.metadata.digest
+        ));
     }
 
     out.push_str("## Unresolved\n\n");
@@ -104,7 +107,10 @@ mod tests {
             reason: "unclassified protocol".into(),
             evidence: vec![],
         });
-        manifest.completeness.limitations.push("dynamic analysis limited to build workload".into());
+        manifest
+            .completeness
+            .limitations
+            .push("dynamic analysis limited to build workload".into());
         let markdown = integration_plan_markdown(&manifest, None);
         assert!(markdown.contains("# Integration plan"));
         assert!(markdown.contains("telemetry.internal"));

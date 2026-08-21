@@ -141,7 +141,9 @@ mod tests {
             purl: "pkg:cargo/serde@1.0.200".into(),
             scope: Scope::Runtime,
             direct: true,
-            states: ClaimStates::default().with(ClaimState::Declared).with(ClaimState::Resolved),
+            states: ClaimStates::default()
+                .with(ClaimState::Declared)
+                .with(ClaimState::Resolved),
             source_file: "Cargo.lock".into(),
         });
         manifest.external_systems.push(ExternalSystemReport {
@@ -167,8 +169,12 @@ mod tests {
         assert_eq!(bom["specVersion"], "1.5");
         assert_eq!(bom["components"][0]["purl"], "pkg:cargo/serde@1.0.200");
         let properties = bom["components"][0]["properties"].as_array().unwrap();
-        assert!(properties.iter().any(|p| p["name"] == "ovid:state:declared"));
-        assert!(!properties.iter().any(|p| p["name"] == "ovid:state:exercised"));
+        assert!(properties
+            .iter()
+            .any(|p| p["name"] == "ovid:state:declared"));
+        assert!(!properties
+            .iter()
+            .any(|p| p["name"] == "ovid:state:exercised"));
         assert_eq!(bom["services"][0]["name"], "orders-db");
     }
 

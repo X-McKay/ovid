@@ -133,7 +133,12 @@ impl ClaimStore {
         };
         let supporting_evidence = resolve(&claim.supports, &mut missing);
         let contradicting_evidence = resolve(&claim.contradicts, &mut missing);
-        Some(Explanation { claim, supporting_evidence, contradicting_evidence, missing_evidence: missing })
+        Some(Explanation {
+            claim,
+            supporting_evidence,
+            contradicting_evidence,
+            missing_evidence: missing,
+        })
     }
 
     /// Persist all claims to disk.
@@ -197,7 +202,11 @@ mod tests {
         let explanation = store.explain(claim.id.as_str(), &ledger).unwrap();
         assert_eq!(explanation.supporting_evidence.len(), 2);
         assert!(explanation.missing_evidence.is_empty());
-        assert!(claim.confidence > 0.9, "two strong tiers should be high: {}", claim.confidence);
+        assert!(
+            claim.confidence > 0.9,
+            "two strong tiers should be high: {}",
+            claim.confidence
+        );
     }
 
     #[test]
@@ -222,7 +231,11 @@ mod tests {
             &ledger,
         );
         // ADR-007: heuristic/model proposals can never be confident facts.
-        assert!(claim.confidence <= 0.5, "T5-only must cap low: {}", claim.confidence);
+        assert!(
+            claim.confidence <= 0.5,
+            "T5-only must cap low: {}",
+            claim.confidence
+        );
     }
 
     #[test]

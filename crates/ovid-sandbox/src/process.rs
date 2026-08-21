@@ -23,7 +23,10 @@ pub struct ProcessBackend {
 
 impl ProcessBackend {
     pub fn new() -> Result<Self, OvidError> {
-        Ok(ProcessBackend { ids: IdGenerator::new(), keep_dir: tempfile::tempdir()? })
+        Ok(ProcessBackend {
+            ids: IdGenerator::new(),
+            keep_dir: tempfile::tempdir()?,
+        })
     }
 
     /// Copy `source_root` into a fresh workspace (clean-rerun semantics).
@@ -71,10 +74,16 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), OvidError> {
 /// the workload must not inherit whatever the operator's shell had).
 fn base_env(workspace: &Path) -> Vec<(String, String)> {
     vec![
-        ("PATH".into(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()),
+        (
+            "PATH".into(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+        ),
         ("HOME".into(), workspace.join(".home").display().to_string()),
         ("LANG".into(), "C.UTF-8".into()),
-        ("TMPDIR".into(), workspace.join(".tmp").display().to_string()),
+        (
+            "TMPDIR".into(),
+            workspace.join(".tmp").display().to_string(),
+        ),
     ]
 }
 
@@ -135,9 +144,15 @@ impl ExecutionBackend for ProcessBackend {
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
-                let cpu = libc::rlimit { rlim_cur: cpu_seconds, rlim_max: cpu_seconds };
+                let cpu = libc::rlimit {
+                    rlim_cur: cpu_seconds,
+                    rlim_max: cpu_seconds,
+                };
                 libc::setrlimit(libc::RLIMIT_CPU, &cpu);
-                let fsize = libc::rlimit { rlim_cur: max_file, rlim_max: max_file };
+                let fsize = libc::rlimit {
+                    rlim_cur: max_file,
+                    rlim_max: max_file,
+                };
                 libc::setrlimit(libc::RLIMIT_FSIZE, &fsize);
                 Ok(())
             });
@@ -156,7 +171,10 @@ impl ExecutionBackend for ProcessBackend {
 
         let mut timed_out = false;
         let status = loop {
-            match child.try_wait().map_err(|e| OvidError::Execution(e.to_string()))? {
+            match child
+                .try_wait()
+                .map_err(|e| OvidError::Execution(e.to_string()))?
+            {
                 Some(status) => break status,
                 None => {
                     if start.elapsed() >= spec.limits.wall_time {
@@ -219,7 +237,11 @@ fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> std::thread::JoinHan
 }
 
 fn tail_string(bytes: &[u8], max: usize) -> String {
-    let slice = if bytes.len() > max { &bytes[bytes.len() - max..] } else { bytes };
+    let slice = if bytes.len() > max {
+        &bytes[bytes.len() - max..]
+    } else {
+        bytes
+    };
     String::from_utf8_lossy(slice).into_owned()
 }
 
@@ -231,7 +253,9 @@ mod tests {
     fn spec_in_place(argv: &[&str], dir: &Path) -> RunSpec {
         RunSpec {
             argv: argv.iter().map(|s| s.to_string()).collect(),
-            workspace: WorkspaceMode::InPlace { root: dir.to_path_buf() },
+            workspace: WorkspaceMode::InPlace {
+                root: dir.to_path_buf(),
+            },
             env: BTreeMap::new(),
             inherit_env: vec![],
             limits: crate::ResourceLimits {
@@ -246,7 +270,10 @@ mod tests {
     fn runs_command_and_captures_output() {
         let backend = ProcessBackend::new().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let mut spec = spec_in_place(&["sh", "-c", "echo out-marker; echo err-marker >&2"], dir.path());
+        let mut spec = spec_in_place(
+            &["sh", "-c", "echo out-marker; echo err-marker >&2"],
+            dir.path(),
+        );
         spec.observe = false;
         let result = backend.run(&spec).unwrap();
         assert!(result.success());
@@ -278,7 +305,10 @@ mod tests {
         let result = backend.run(&spec).unwrap();
         assert!(result.timed_out);
         assert!(!result.success());
-        assert!(start.elapsed() < Duration::from_secs(10), "kill must be prompt");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "kill must be prompt"
+        );
     }
 
     #[test]
@@ -287,8 +317,14 @@ mod tests {
         std::fs::write(source.path().join("input.txt"), "original").unwrap();
         let backend = ProcessBackend::new().unwrap();
         let spec = RunSpec {
-            argv: vec!["sh".into(), "-c".into(), "echo dirty > input.txt && echo new > created.txt".into()],
-            workspace: WorkspaceMode::Ephemeral { source_root: source.path().to_path_buf() },
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo dirty > input.txt && echo new > created.txt".into(),
+            ],
+            workspace: WorkspaceMode::Ephemeral {
+                source_root: source.path().to_path_buf(),
+            },
             env: BTreeMap::new(),
             inherit_env: vec![],
             limits: Default::default(),
@@ -297,7 +333,10 @@ mod tests {
         let result = backend.run(&spec).unwrap();
         assert!(result.success());
         // Source untouched; workspace modified.
-        assert_eq!(std::fs::read_to_string(source.path().join("input.txt")).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(source.path().join("input.txt")).unwrap(),
+            "original"
+        );
         assert!(result.workspace_path.join("created.txt").exists());
         assert!(!source.path().join("created.txt").exists());
     }
@@ -311,7 +350,11 @@ mod tests {
         let backend = ProcessBackend::new().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut spec = spec_in_place(
-            &["sh", "-c", "cat /nonexistent-ovid-test-file 2>/dev/null; true"],
+            &[
+                "sh",
+                "-c",
+                "cat /nonexistent-ovid-test-file 2>/dev/null; true",
+            ],
             dir.path(),
         );
         spec.observe = true;

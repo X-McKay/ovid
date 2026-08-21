@@ -125,7 +125,11 @@ impl Context {
     }
 }
 
-fn acquire_snapshot(locator: &str, reference: Option<String>, out_dir: &Path) -> Result<RepoSnapshot> {
+fn acquire_snapshot(
+    locator: &str,
+    reference: Option<String>,
+    out_dir: &Path,
+) -> Result<RepoSnapshot> {
     let source = RepositorySource::parse(locator, reference);
     let options = AcquireOptions::new(out_dir.join(".workdir"));
     acquire(&source, &options).map_err(|e| anyhow!("acquire {locator}: {e}"))
@@ -144,7 +148,11 @@ fn repository_section(snapshot: &RepoSnapshot) -> RepositorySection {
 
 /// Record inventory results into the ledger and claims (§10.1: explicitly
 /// static provenance).
-fn record_inventory(ctx: &mut Context, snapshot: &RepoSnapshot, report: &InventoryReport) -> Result<()> {
+fn record_inventory(
+    ctx: &mut Context,
+    snapshot: &RepoSnapshot,
+    report: &InventoryReport,
+) -> Result<()> {
     let mut file_evidence: BTreeMap<String, OvidId> = BTreeMap::new();
     for file in &report.scanned_files {
         let digest = snapshot.files.get(file).map(|f| f.digest.clone());
@@ -164,7 +172,11 @@ fn record_inventory(ctx: &mut Context, snapshot: &RepoSnapshot, report: &Invento
             .cloned()
             .into_iter()
             .collect::<Vec<_>>();
-        let predicate = if component.states.resolved { "resolves-to" } else { "declares" };
+        let predicate = if component.states.resolved {
+            "resolves-to"
+        } else {
+            "declares"
+        };
         ctx.claim(
             predicate,
             repo_subject.clone(),
@@ -200,16 +212,22 @@ fn execute_workload(
 ) -> Result<WorkloadExecution> {
     let backend = ProcessBackend::new().map_err(|e| anyhow!("{e}"))?;
     let workspace = if options.in_place {
-        WorkspaceMode::InPlace { root: snapshot.root.clone() }
+        WorkspaceMode::InPlace {
+            root: snapshot.root.clone(),
+        }
     } else {
-        WorkspaceMode::Ephemeral { source_root: snapshot.root.clone() }
+        WorkspaceMode::Ephemeral {
+            source_root: snapshot.root.clone(),
+        }
     };
     let mut spec = RunSpec::new(argv.to_vec(), workspace);
     spec.inherit_env = options.inherit_env.clone();
     spec.limits.wall_time = Duration::from_secs(options.timeout_seconds);
     let run_id = ctx.ids.next("run");
 
-    let result = backend.run(&spec).map_err(|e| anyhow!("run {argv:?}: {e}"))?;
+    let result = backend
+        .run(&spec)
+        .map_err(|e| anyhow!("run {argv:?}: {e}"))?;
 
     // Normalize + aggregate + ledger append.
     let (events, unparsed, raw_count) = match &result.observation {
@@ -252,7 +270,8 @@ fn execute_workload(
         Some(run_id.clone()),
     )?;
 
-    let network = ovid_gateway::analyze_network(&aggregated.events, &ctx.registry, &BTreeMap::new());
+    let network =
+        ovid_gateway::analyze_network(&aggregated.events, &ctx.registry, &BTreeMap::new());
     let proposals = propose_resolutions(&aggregated.events, &network, &ctx.registry);
 
     Ok(WorkloadExecution {
@@ -287,7 +306,10 @@ fn absorb_execution(
 ) -> Result<()> {
     let success = predicate.evaluate(
         execution.result.exit_code,
-        &format!("{}\n{}", execution.result.stdout_tail, execution.result.stderr_tail),
+        &format!(
+            "{}\n{}",
+            execution.result.stdout_tail, execution.result.stderr_tail
+        ),
         &execution.result.workspace_path,
     );
     manifest.analysis.runs.total += 1;
@@ -301,7 +323,11 @@ fn absorb_execution(
         name: workload_name.into(),
         command: argv.to_vec(),
         success_predicate: predicate.describe(),
-        status: if success { "passed".into() } else { "failed".into() },
+        status: if success {
+            "passed".into()
+        } else {
+            "failed".into()
+        },
         duration_ms: Some(execution.result.duration.as_millis() as u64),
         world_digest: None,
     });
@@ -309,7 +335,12 @@ fn absorb_execution(
 
     // Listeners.
     for listener in &execution.network.listeners {
-        if !manifest.runtime.listeners.iter().any(|l| l.port == listener.port) {
+        if !manifest
+            .runtime
+            .listeners
+            .iter()
+            .any(|l| l.port == listener.port)
+        {
             manifest.runtime.listeners.push(listener.clone());
         }
         let supports = ledger_ids(execution, &listener.evidence);
@@ -353,8 +384,10 @@ fn absorb_execution(
             states,
             supports.clone(),
         );
-        if let Some(existing) =
-            manifest.external_systems.iter_mut().find(|s| s.id == id && s.port == observation.port)
+        if let Some(existing) = manifest
+            .external_systems
+            .iter_mut()
+            .find(|s| s.id == id && s.port == observation.port)
         {
             existing.attempts += observation.attempts;
             existing.failures += observation.failures;
@@ -362,7 +395,10 @@ fn absorb_execution(
         }
         manifest.external_systems.push(ExternalSystemReport {
             id: id.clone(),
-            protocol: observation.protocol.clone().unwrap_or_else(|| "unknown".into()),
+            protocol: observation
+                .protocol
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
             address: observation.address.clone(),
             port: observation.port,
             dns_name: observation.dns_name.clone(),
@@ -378,7 +414,11 @@ fn absorb_execution(
     // Resolution proposals become tool reports / unresolved items.
     for proposal in &execution.proposals {
         match &proposal.kind {
-            ResolutionKind::InstallTool { executable, package, provider } => {
+            ResolutionKind::InstallTool {
+                executable,
+                package,
+                provider,
+            } => {
                 if !manifest.build.tools.iter().any(|t| &t.name == executable) {
                     manifest.build.tools.push(ToolReport {
                         name: executable.clone(),
@@ -396,7 +436,11 @@ fn absorb_execution(
                     supports,
                 );
             }
-            ResolutionKind::ProvideFile { path, package, provider } => {
+            ResolutionKind::ProvideFile {
+                path,
+                package,
+                provider,
+            } => {
                 let supports = ledger_ids(execution, &proposal.evidence);
                 ctx.claim(
                     "requires",
@@ -409,7 +453,10 @@ fn absorb_execution(
                     "missing file {path} (candidate: {provider}:{package})"
                 ));
             }
-            ResolutionKind::LeaveUnresolved { dependency_id, reason } => {
+            ResolutionKind::LeaveUnresolved {
+                dependency_id,
+                reason,
+            } => {
                 if !manifest.unresolved.iter().any(|u| &u.id == dependency_id) {
                     manifest.unresolved.push(UnresolvedItem {
                         id: dependency_id.clone(),
@@ -430,7 +477,10 @@ fn absorb_execution(
     if let Some(observation) = &execution.result.observation {
         let mut seen: std::collections::BTreeSet<String> = Default::default();
         for envelope in &observation.events {
-            if let BoundaryEvent::ProcessExec { path, errno: None, .. } = &envelope.event {
+            if let BoundaryEvent::ProcessExec {
+                path, errno: None, ..
+            } = &envelope.event
+            {
                 let base = path.rsplit('/').next().unwrap_or(path).to_string();
                 if seen.insert(base) {}
             }
@@ -463,8 +513,7 @@ fn finalize(ctx: &mut Context, manifest: &mut Manifest, lock: Option<&WorldLock>
         "complete-with-unresolved".into()
     };
     manifest.provenance.evidence_chain_head = ctx.ledger.chain_head().cloned();
-    manifest.provenance.packs =
-        ctx.registry.all().iter().map(|p| p.label()).collect();
+    manifest.provenance.packs = ctx.registry.all().iter().map(|p| p.label()).collect();
 
     ctx.claims.save().map_err(|e| anyhow!("{e}"))?;
     std::fs::write(ctx.out_dir.join("ovid.yaml"), manifest.to_yaml())?;
@@ -521,7 +570,11 @@ pub fn run_inventory(
         .limitations
         .push("inventory mode: no code was executed; dynamic states are unknown".into());
     finalize(&mut ctx, &mut manifest, None)?;
-    Ok(Bundle { manifest, out_dir: out.to_path_buf(), lock: None })
+    Ok(Bundle {
+        manifest,
+        out_dir: out.to_path_buf(),
+        lock: None,
+    })
 }
 
 pub fn run_observe(
@@ -552,10 +605,18 @@ pub fn run_observe(
     manifest.inventory.scanned_files = report.scanned_files.clone();
     manifest.completeness.warnings = report.warnings.clone();
     let predicate = SuccessPredicate::ExitCode { expected: 0 };
-    absorb_execution(&mut ctx, &mut manifest, &execution, "observe", &argv, &predicate)?;
-    manifest.completeness.limitations.push(
-        "observe mode: single explicit command; dependency causality not established".into(),
-    );
+    absorb_execution(
+        &mut ctx,
+        &mut manifest,
+        &execution,
+        "observe",
+        &argv,
+        &predicate,
+    )?;
+    manifest
+        .completeness
+        .limitations
+        .push("observe mode: single explicit command; dependency causality not established".into());
     if execution.result.observation.is_none() {
         manifest
             .completeness
@@ -563,7 +624,11 @@ pub fn run_observe(
             .push("strace unavailable: boundary observation was not captured".into());
     }
     finalize(&mut ctx, &mut manifest, None)?;
-    Ok(Bundle { manifest, out_dir: out.to_path_buf(), lock: None })
+    Ok(Bundle {
+        manifest,
+        out_dir: out.to_path_buf(),
+        lock: None,
+    })
 }
 
 pub fn run_analyze(
@@ -626,10 +691,16 @@ pub fn run_analyze(
             }),
             None,
         )?;
-        let execution =
-            execute_workload(&mut ctx, &snapshot, &action.command, options, kind_name)?;
+        let execution = execute_workload(&mut ctx, &snapshot, &action.command, options, kind_name)?;
         let predicate = SuccessPredicate::ExitCode { expected: 0 };
-        absorb_execution(&mut ctx, &mut manifest, &execution, kind_name, &action.command, &predicate)?;
+        absorb_execution(
+            &mut ctx,
+            &mut manifest,
+            &execution,
+            kind_name,
+            &action.command,
+            &predicate,
+        )?;
         last_execution = Some((execution, action.command.clone(), kind_name.clone()));
     }
 
@@ -705,10 +776,17 @@ pub fn run_analyze(
     // World synthesis from the last executed workload (§14.12, proposed
     // status only: verified requires replaying in real service cells).
     let lock = if let Some((execution, argv, _)) = &last_execution {
-        let mut world = World { target: snapshot.canonical_url.clone(), ..Default::default() };
+        let mut world = World {
+            target: snapshot.canonical_url.clone(),
+            ..Default::default()
+        };
         for proposal in &execution.proposals {
             match &proposal.kind {
-                ResolutionKind::StartService { dependency_id, pack, port } => {
+                ResolutionKind::StartService {
+                    dependency_id,
+                    pack,
+                    port,
+                } => {
                     let image = ctx
                         .registry
                         .service_packs()
@@ -717,26 +795,40 @@ pub fn run_analyze(
                         .unwrap_or_default();
                     world.dependencies.push(WorldDependency {
                         id: dependency_id.clone(),
-                        treatment: Treatment::RealService { pack: pack.clone(), image },
+                        treatment: Treatment::RealService {
+                            pack: pack.clone(),
+                            image,
+                        },
                         aliases: vec![dependency_id.clone()],
                         port: Some(*port),
                         environment: BTreeMap::new(),
                     });
                 }
-                ResolutionKind::SupplyStub { dependency_id, protocol, port } => {
+                ResolutionKind::SupplyStub {
+                    dependency_id,
+                    protocol,
+                    port,
+                } => {
                     world.dependencies.push(WorldDependency {
                         id: dependency_id.clone(),
-                        treatment: Treatment::Stub { protocol: protocol.clone() },
+                        treatment: Treatment::Stub {
+                            protocol: protocol.clone(),
+                        },
                         aliases: vec![dependency_id.clone()],
                         port: Some(*port),
                         environment: BTreeMap::new(),
                     });
                 }
-                ResolutionKind::LeaveUnresolved { dependency_id, reason } => {
+                ResolutionKind::LeaveUnresolved {
+                    dependency_id,
+                    reason,
+                } => {
                     if !dependency_id.starts_with("tool:") {
                         world.dependencies.push(WorldDependency {
                             id: dependency_id.clone(),
-                            treatment: Treatment::Unresolved { reason: reason.clone() },
+                            treatment: Treatment::Unresolved {
+                                reason: reason.clone(),
+                            },
                             aliases: vec![dependency_id.clone()],
                             port: None,
                             environment: BTreeMap::new(),
@@ -751,11 +843,8 @@ pub fn run_analyze(
                 ResolutionKind::ProvideFile { .. } => {}
             }
         }
-        let mut lock = WorldLock::from_world(
-            &world,
-            argv.clone(),
-            SuccessSpec::ExitCode { expected: 0 },
-        );
+        let mut lock =
+            WorldLock::from_world(&world, argv.clone(), SuccessSpec::ExitCode { expected: 0 });
         lock.status = WorldStatus::Proposed;
         manifest.world.status = "proposed".into();
         manifest.world.lock_digest = Some(lock.metadata.digest.clone());
@@ -776,7 +865,12 @@ pub fn run_analyze(
             .collect();
         // Propagate treatments back onto external systems.
         for system in &mut manifest.external_systems {
-            if let Some(summary) = manifest.world.dependencies.iter().find(|d| d.id == system.id) {
+            if let Some(summary) = manifest
+                .world
+                .dependencies
+                .iter()
+                .find(|d| d.id == system.id)
+            {
                 system.treatment = Some(summary.treatment.clone());
             }
         }
@@ -794,7 +888,11 @@ pub fn run_analyze(
         .limitations
         .push("dynamic analysis is limited to the executed workloads".into());
     finalize(&mut ctx, &mut manifest, lock.as_ref())?;
-    Ok(Bundle { manifest, out_dir: out.to_path_buf(), lock })
+    Ok(Bundle {
+        manifest,
+        out_dir: out.to_path_buf(),
+        lock,
+    })
 }
 
 pub fn explain(claim_query: &str, from: &Path) -> Result<()> {
@@ -849,8 +947,18 @@ pub fn print_summary(bundle: &Bundle) {
     println!(
         "components: {} ({} declared, {} resolved)",
         manifest.inventory.components.len(),
-        manifest.inventory.components.iter().filter(|c| c.states.declared).count(),
-        manifest.inventory.components.iter().filter(|c| c.states.resolved).count(),
+        manifest
+            .inventory
+            .components
+            .iter()
+            .filter(|c| c.states.declared)
+            .count(),
+        manifest
+            .inventory
+            .components
+            .iter()
+            .filter(|c| c.states.resolved)
+            .count(),
     );
     for workload in &manifest.workloads {
         println!(
@@ -870,7 +978,10 @@ pub fn print_summary(bundle: &Bundle) {
             system.protocol,
             system.attempts,
             system.failures,
-            system.causality.map(|c| format!("{c:?}")).unwrap_or_default()
+            system
+                .causality
+                .map(|c| format!("{c:?}"))
+                .unwrap_or_default()
         );
     }
     for listener in &manifest.runtime.listeners {
@@ -910,7 +1021,9 @@ pub fn policy_digest(options: &ExecutionOptions) -> Digest {
     Digest::of_bytes(
         format!(
             "in_place={};inherit_env={:?};timeout={};counterfactual_env={:?}",
-            options.in_place, options.inherit_env, options.timeout_seconds,
+            options.in_place,
+            options.inherit_env,
+            options.timeout_seconds,
             options.counterfactual_env
         )
         .as_bytes(),

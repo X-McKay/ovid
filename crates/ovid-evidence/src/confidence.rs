@@ -80,8 +80,7 @@ mod tests {
     #[test]
     fn more_independent_support_raises_confidence() {
         let one = combine_confidence(&[TrustTier::T2], 0, ConfidenceCap::Observed);
-        let two =
-            combine_confidence(&[TrustTier::T2, TrustTier::T0], 0, ConfidenceCap::Observed);
+        let two = combine_confidence(&[TrustTier::T2, TrustTier::T0], 0, ConfidenceCap::Observed);
         assert!(two > one);
     }
 

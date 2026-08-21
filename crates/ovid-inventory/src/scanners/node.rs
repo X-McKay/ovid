@@ -78,7 +78,9 @@ fn resolved(name: &str, version: &str, source: &str) -> Component {
 
 fn scan_package_json(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        report.warnings.push(format!("unparseable package.json at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable package.json at {source}"));
         return;
     };
     let sections = [
@@ -99,12 +101,17 @@ fn scan_package_json(text: &str, source: &str, report: &mut InventoryReport) {
 /// `{version}`. v1 uses a nested `dependencies` map.
 fn scan_package_lock(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
-        report.warnings.push(format!("unparseable package-lock.json at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable package-lock.json at {source}"));
         return;
     };
     if let Some(packages) = value.get("packages").and_then(|p| p.as_object()) {
         for (path, info) in packages {
-            let Some(name) = path.rsplit("node_modules/").next().filter(|_| !path.is_empty())
+            let Some(name) = path
+                .rsplit("node_modules/")
+                .next()
+                .filter(|_| !path.is_empty())
             else {
                 continue;
             };
@@ -127,10 +134,14 @@ fn scan_package_lock(text: &str, source: &str, report: &mut InventoryReport) {
 /// pnpm lockfile: `packages` keys like `/name@version` or `/@scope/name@1.2.3`.
 fn scan_pnpm_lock(text: &str, source: &str, report: &mut InventoryReport) {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
-        report.warnings.push(format!("unparseable pnpm-lock.yaml at {source}"));
+        report
+            .warnings
+            .push(format!("unparseable pnpm-lock.yaml at {source}"));
         return;
     };
-    let Some(packages) = value.get("packages").and_then(|p| p.as_mapping()) else { return };
+    let Some(packages) = value.get("packages").and_then(|p| p.as_mapping()) else {
+        return;
+    };
     for key in packages.keys() {
         let Some(key) = key.as_str() else { continue };
         let key = key.trim_start_matches('/');
@@ -151,7 +162,12 @@ fn scan_yarn_lock(text: &str, source: &str, report: &mut InventoryReport) {
     for line in text.lines() {
         if !line.starts_with(' ') && line.trim_end().ends_with(':') {
             let head = line.trim_end().trim_end_matches(':');
-            let first = head.split(',').next().unwrap_or(head).trim().trim_matches('"');
+            let first = head
+                .split(',')
+                .next()
+                .unwrap_or(head)
+                .trim()
+                .trim_matches('"');
             // `@scope/name@range` or `name@range` — split at last '@'.
             current_name = first
                 .rfind('@')
@@ -200,7 +216,10 @@ mod tests {
             .find(|c| c.name == "express" && c.version.as_deref() == Some("4.19.2"))
             .unwrap();
         assert!(express.states.declared && express.states.resolved);
-        assert!(report.components.iter().any(|c| c.name == "accepts" && !c.direct));
+        assert!(report
+            .components
+            .iter()
+            .any(|c| c.name == "accepts" && !c.direct));
         assert!(report.components.iter().any(|c| c.name == "@types/node"));
     }
 

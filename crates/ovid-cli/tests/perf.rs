@@ -43,7 +43,12 @@ fn inventory_5000_files_under_threshold() {
     let _ = std::fs::remove_dir_all(&out);
     let start = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_ovid"))
-        .args(["inventory", repo.to_str().unwrap(), "--out", out.to_str().unwrap()])
+        .args([
+            "inventory",
+            repo.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     let elapsed = start.elapsed();
@@ -51,7 +56,10 @@ fn inventory_5000_files_under_threshold() {
     println!("PERF inventory 5000 files: {} ms", elapsed.as_millis());
     // Spec target: p50 < 30 s for <100k files (§12.2). Guardrail here:
     // 5k files in < 20 s even on slow CI.
-    assert!(elapsed < Duration::from_secs(20), "inventory too slow: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "inventory too slow: {elapsed:?}"
+    );
 }
 
 #[test]
@@ -65,8 +73,12 @@ fn observed_run_overhead_is_bounded() {
         let start = Instant::now();
         if !observe {
             // Native baseline: the same loop under plain sh.
-            let status =
-                Command::new("sh").arg("-c").arg(workload).current_dir(&repo).status().unwrap();
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(workload)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
             assert!(status.success());
             return start.elapsed();
         }
@@ -130,8 +142,14 @@ fn ledger_append_throughput() {
     }
     let elapsed = start.elapsed();
     let per_second = count as f64 / elapsed.as_secs_f64();
-    println!("PERF ledger append: {count} records in {} ms ({per_second:.0}/s)", elapsed.as_millis());
-    assert!(per_second > 1000.0, "ledger append too slow: {per_second:.0}/s");
+    println!(
+        "PERF ledger append: {count} records in {} ms ({per_second:.0}/s)",
+        elapsed.as_millis()
+    );
+    assert!(
+        per_second > 1000.0,
+        "ledger append too slow: {per_second:.0}/s"
+    );
     ledger.verify_chain().unwrap();
 }
 
@@ -167,5 +185,8 @@ fn aggregation_handles_event_floods() {
         elapsed.as_millis()
     );
     assert_eq!(aggregated.events.len(), 1000);
-    assert!(elapsed < Duration::from_secs(5), "aggregation too slow: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "aggregation too slow: {elapsed:?}"
+    );
 }

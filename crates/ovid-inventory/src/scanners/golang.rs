@@ -34,13 +34,23 @@ impl Scanner for GoScanner {
     }
 }
 
-fn component(module: &str, version: &str, direct: bool, state: ClaimState, source: &str) -> Component {
+fn component(
+    module: &str,
+    version: &str,
+    direct: bool,
+    state: ClaimState,
+    source: &str,
+) -> Component {
     Component {
         name: module.to_string(),
         version: Some(version.to_string()),
         ecosystem: "golang".into(),
         purl: purl("golang", module, Some(version)),
-        scope: if direct { Scope::Runtime } else { Scope::Unknown },
+        scope: if direct {
+            Scope::Runtime
+        } else {
+            Scope::Unknown
+        },
         direct,
         states: ClaimStates::default().with(state),
         source_file: source.to_string(),
@@ -75,9 +85,13 @@ fn scan_go_mod(text: &str, source: &str, report: &mut InventoryReport) {
                 // dropped comments, so treat all as declared and mark
                 // directness from the raw line.
                 let direct = !raw.contains("// indirect");
-                report
-                    .components
-                    .push(component(module, version, direct, ClaimState::Declared, source));
+                report.components.push(component(
+                    module,
+                    version,
+                    direct,
+                    ClaimState::Declared,
+                    source,
+                ));
             }
         }
     }
@@ -87,12 +101,18 @@ fn scan_go_sum(text: &str, source: &str, report: &mut InventoryReport) {
     let mut seen = std::collections::BTreeSet::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
-        let (Some(module), Some(version)) = (parts.next(), parts.next()) else { continue };
+        let (Some(module), Some(version)) = (parts.next(), parts.next()) else {
+            continue;
+        };
         let version = version.trim_end_matches("/go.mod");
         if seen.insert((module.to_string(), version.to_string())) {
-            report
-                .components
-                .push(component(module, version, false, ClaimState::Resolved, source));
+            report.components.push(component(
+                module,
+                version,
+                false,
+                ClaimState::Resolved,
+                source,
+            ));
         }
     }
 }
@@ -127,8 +147,15 @@ mod tests {
             .find(|c| c.name == "github.com/gin-gonic/gin")
             .unwrap();
         assert!(gin.states.declared && gin.states.resolved && gin.direct);
-        let sys = report.components.iter().find(|c| c.name == "golang.org/x/sys").unwrap();
+        let sys = report
+            .components
+            .iter()
+            .find(|c| c.name == "golang.org/x/sys")
+            .unwrap();
         assert!(!sys.direct, "indirect modules must not be direct");
-        assert!(report.components.iter().any(|c| c.name == "github.com/lib/pq"));
+        assert!(report
+            .components
+            .iter()
+            .any(|c| c.name == "github.com/lib/pq"));
     }
 }

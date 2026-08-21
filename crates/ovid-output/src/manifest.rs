@@ -230,11 +230,7 @@ pub struct ProvenanceTool {
 
 impl Manifest {
     /// Skeleton with mandatory sections filled and everything else empty.
-    pub fn new(
-        analysis_id: String,
-        mode: &str,
-        repository: RepositorySection,
-    ) -> Manifest {
+    pub fn new(analysis_id: String, mode: &str, repository: RepositorySection) -> Manifest {
         Manifest {
             api_version: MANIFEST_API_VERSION.to_string(),
             kind: "RepositoryAnalysis".to_string(),
@@ -256,7 +252,10 @@ impl Manifest {
             build: BuildSection::default(),
             runtime: RuntimeSection::default(),
             external_systems: Vec::new(),
-            world: WorldSection { status: "none".into(), ..Default::default() },
+            world: WorldSection {
+                status: "none".into(),
+                ..Default::default()
+            },
             vulnerabilities: Vec::new(),
             unresolved: Vec::new(),
             completeness: CompletenessSection::default(),
@@ -286,7 +285,11 @@ impl Manifest {
 
     /// Component index by purl, used by diffs.
     pub fn components_by_purl(&self) -> BTreeMap<&str, &Component> {
-        self.inventory.components.iter().map(|c| (c.purl.as_str(), c)).collect()
+        self.inventory
+            .components
+            .iter()
+            .map(|c| (c.purl.as_str(), c))
+            .collect()
     }
 }
 

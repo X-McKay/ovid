@@ -75,7 +75,10 @@ impl InventoryReport {
 
 /// Run language detection and every applicable scanner over a snapshot.
 pub fn scan(snapshot: &RepoSnapshot) -> InventoryReport {
-    let mut report = InventoryReport { languages: detect_languages(snapshot), ..Default::default() };
+    let mut report = InventoryReport {
+        languages: detect_languages(snapshot),
+        ..Default::default()
+    };
     for scanner in scanners::all() {
         scanner.scan(snapshot, &mut report);
     }
@@ -90,8 +93,11 @@ fn merge_components(report: &mut InventoryReport) {
     use std::collections::BTreeMap;
     let mut merged: BTreeMap<(String, String, Option<String>), Component> = BTreeMap::new();
     for component in report.components.drain(..) {
-        let key =
-            (component.ecosystem.clone(), component.name.clone(), component.version.clone());
+        let key = (
+            component.ecosystem.clone(),
+            component.name.clone(),
+            component.version.clone(),
+        );
         match merged.get_mut(&key) {
             Some(existing) => {
                 existing.states.declared |= component.states.declared;
@@ -115,8 +121,7 @@ fn merge_components(report: &mut InventoryReport) {
         .map(|(e, n, _)| (e.clone(), n.clone()))
         .collect();
     let mut out: Vec<Component> = Vec::with_capacity(merged.len());
-    let mut declared_versionless: std::collections::BTreeSet<(String, String)> =
-        Default::default();
+    let mut declared_versionless: std::collections::BTreeSet<(String, String)> = Default::default();
     for ((eco, name, version), component) in &merged {
         if version.is_none() && names_with_versions.contains(&(eco.clone(), name.clone())) {
             if component.states.declared {

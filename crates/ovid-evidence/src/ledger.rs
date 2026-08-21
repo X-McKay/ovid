@@ -28,8 +28,12 @@ impl EvidenceLedger {
     /// Open or create a ledger at `path`, loading any existing records.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, OvidError> {
         let path = path.into();
-        let mut ledger =
-            EvidenceLedger { path: path.clone(), head: None, count: 0, index: HashMap::new() };
+        let mut ledger = EvidenceLedger {
+            path: path.clone(),
+            head: None,
+            count: 0,
+            index: HashMap::new(),
+        };
         if path.exists() {
             let reader = BufReader::new(File::open(&path)?);
             for line in reader.lines() {
@@ -54,7 +58,10 @@ impl EvidenceLedger {
     pub fn append(&mut self, mut record: EvidenceRecord) -> Result<Digest, OvidError> {
         record.previous = self.head.clone();
         let digest = record.digest();
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         let json = serde_json::to_string(&record)?;
         writeln!(file, "{json}")?;
         self.head = Some(digest.clone());
@@ -120,7 +127,9 @@ impl EvidenceLedger {
             previous = Some(record.digest());
         }
         if previous != self.head {
-            return Err(OvidError::Evidence("ledger head does not match file contents".into()));
+            return Err(OvidError::Evidence(
+                "ledger head does not match file contents".into(),
+            ));
         }
         Ok(previous)
     }
