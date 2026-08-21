@@ -430,7 +430,21 @@ fn absorb_declared_endpoints(
                     .map(|(_, p)| p.system.clone())
             })
             .unwrap_or_else(|| "unknown".into());
+        // A host written entirely without lowercase letters
+        // (`REPLACE-WITH-RIG0-ENDPOINT`) is a template placeholder by
+        // config convention, not a resolvable name: the value is supplied
+        // at deployment time, exactly like an env var. Report the
+        // connectivity, flag the identity, never assert the name (§6.6).
+        let template_placeholder = endpoint.host.as_deref().is_some_and(|host| {
+            host.chars().any(|c| c.is_ascii_alphabetic())
+                && !host.chars().any(|c| c.is_ascii_lowercase())
+        });
         let (id, address, identity) = match (&endpoint.host, &endpoint.env_var) {
+            (Some(host), _) if template_placeholder => (
+                format!("{host}:{port}"),
+                host.clone(),
+                "template-placeholder".to_string(),
+            ),
             (Some(host), _) => (
                 format!("{host}:{port}"),
                 host.clone(),
@@ -443,18 +457,28 @@ fn absorb_declared_endpoints(
             ),
             (None, None) => unreachable!("filtered above"),
         };
-        if let (None, Some(var)) = (&endpoint.host, &endpoint.env_var) {
-            let mut detail = format!("endpoint host bound at runtime from env var {var}");
-            if let Some(scheme) = &endpoint.scheme {
-                detail.push_str(&format!(" (scheme {scheme}"));
-                if let Some(path) = &endpoint.path {
-                    detail.push_str(&format!(", path {path}"));
+        let unresolved_reason = match (&endpoint.host, &endpoint.env_var) {
+            (Some(host), _) if template_placeholder => Some(format!(
+                "declared endpoint host is a template placeholder ({host}); \
+                 the real value is supplied at deployment time"
+            )),
+            (None, Some(var)) => {
+                let mut detail = format!("endpoint host bound at runtime from env var {var}");
+                if let Some(scheme) = &endpoint.scheme {
+                    detail.push_str(&format!(" (scheme {scheme}"));
+                    if let Some(path) = &endpoint.path {
+                        detail.push_str(&format!(", path {path}"));
+                    }
+                    detail.push(')');
                 }
-                detail.push(')');
+                Some(detail)
             }
+            _ => None,
+        };
+        if let Some(reason) = unresolved_reason {
             manifest.unresolved.push(UnresolvedItem {
                 id: id.clone(),
-                reason: detail,
+                reason,
                 evidence: vec![evidence_id.to_string()],
             });
         }
@@ -463,7 +487,11 @@ fn absorb_declared_endpoints(
             protocol,
             address,
             port,
-            dns_name: endpoint.host.clone(),
+            dns_name: if template_placeholder {
+                None // a placeholder token is not a DNS name
+            } else {
+                endpoint.host.clone()
+            },
             endpoints: Vec::new(),
             identity,
             declared: true,

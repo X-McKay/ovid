@@ -605,14 +605,34 @@ fn declared_endpoints_and_env_indirection_are_reported() {
     assert_eq!(model_url["port"], 8080);
     assert!(!external.iter().any(|s| s["id"] == "env:LOG_LEVEL"));
 
-    // Env-parameterized endpoints are unresolved (host unknown by
-    // construction), never guessed (§6.6).
+    // A template-placeholder host (all-caps convention) is flagged, not
+    // asserted as a real name.
+    let mirror = external
+        .iter()
+        .find(|s| s["id"] == "REPLACE-WITH-MIRROR-HOST:8000")
+        .expect("placeholder endpoint present");
+    assert_eq!(mirror["identity"], "template-placeholder");
+    assert!(
+        mirror["dns_name"].is_null(),
+        "placeholder is not a DNS name"
+    );
+    assert_eq!(mirror["port"], 8000);
+
+    // Env-parameterized and placeholder endpoints are unresolved (host
+    // unknown by construction), never guessed (§6.6).
     let unresolved = manifest["unresolved"].as_array().unwrap();
     assert!(unresolved.iter().any(|u| u["id"] == "env:TELEMETRY_HOST"
         && u["reason"]
             .as_str()
             .unwrap()
             .contains("bound at runtime from env var TELEMETRY_HOST")));
+    assert!(unresolved
+        .iter()
+        .any(|u| u["id"] == "REPLACE-WITH-MIRROR-HOST:8000"
+            && u["reason"]
+                .as_str()
+                .unwrap()
+                .contains("template placeholder")));
 
     // Ledger + claims carry the declarations with the right tiers.
     let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();

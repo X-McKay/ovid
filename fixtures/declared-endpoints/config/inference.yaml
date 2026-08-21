@@ -8,3 +8,5 @@ telemetry:
   collector: https://${TELEMETRY_HOST}/ingest
 database:
   host: ${FIXTURE_DB_HOST}
+offline_mirror:
+  base_url: http://REPLACE-WITH-MIRROR-HOST:8000/v1
