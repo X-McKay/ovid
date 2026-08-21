@@ -179,8 +179,39 @@ hints as remediation, never as evidence).
 
 Causality is strictly counterfactual (spec §20) and lives entirely in
 `ovid-domain::classify` — see "The 0.2 prove loop" above for the
-scheduler (natural counterfactuals, the deny-all screen, and
-per-executable hide trials) and the classification gates.
+scheduler (natural counterfactuals, the deny-all screen, per-executable
+hide trials, and per-dependency egress blocks) and the classification
+gates.
+
+## The laboratory gateway (spec §13.10)
+
+A loopback-proxied environment hides real destinations from the syscall
+boundary: a proxy-aware client sends `CONNECT host:port` inside the TCP
+stream, so strace sees only `connect(127.0.0.1:<proxyport>)`. The
+laboratory therefore runs its own gateway (`ovid-gateway::proxy`), a
+std-only HTTP proxy that *names* every destination — scheme, host, port,
+method, and (for plain HTTP) path — and enforces one of three policies:
+
+- **Deny** — record the intent, return `403`. Nothing real is contacted.
+- **Forward** — record and tunnel, chaining the host's own upstream
+  proxy. TLS is tunneled opaquely; the gateway never man-in-the-middles.
+- **ForwardExcept** — forward all but one logical destination: the
+  enforcement mechanism for the `BlockDependency` treatment.
+
+`ovid prove --egress` selects the posture. Under **deny** (the default),
+workload trials run in a network namespace *and* proxy at an
+in-namespace deny gateway (`ovid internal-gateway`, a hidden
+subcommand): the kernel blocks direct sockets, the gateway refuses and
+names proxied requests — Ovid learns what the workload wanted to reach
+while contacting nothing. Under **allow**, trials run with a host-side
+forward gateway (real, attributed egress), and the scheduler can block
+exactly one dependency at a time to resolve a coupled group into
+individual `required`/`optional` labels. Named intents are folded into
+network candidates (loopback excluded) and preserved verbatim as T1
+`egress-observed` journal evidence with full method/path/decision
+detail. Credential-bearing upstream URLs are rejected, and the gateway
+never forwards a request the policy refuses — so the "no real traffic"
+guarantee is enforced, not advisory.
 
 ## Execution backends
 

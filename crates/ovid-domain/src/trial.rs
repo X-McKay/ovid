@@ -23,6 +23,11 @@ pub enum Treatment {
     /// All external egress unavailable — the broad screening treatment
     /// (proposal §10.5 step 2). Loopback stays intact.
     DenyAllEgress,
+    /// Exactly one logical network dependency made unavailable while all
+    /// others stay reachable — per-dependency egress control through the
+    /// laboratory gateway (proposal §10.5 step 5). Isolates one service
+    /// so a group failure can resolve to individual labels.
+    BlockDependency { dependency: DependencyKey },
     /// Exactly one executable hidden from the workload's search path —
     /// the per-dependency treatment for environment-provided tools.
     HideExecutable { name: String },
@@ -39,6 +44,9 @@ impl Treatment {
         match self {
             Treatment::None => "none (baseline)".into(),
             Treatment::DenyAllEgress => "deny all external egress".into(),
+            Treatment::BlockDependency { dependency } => {
+                format!("block {}", dependency.describe())
+            }
             Treatment::HideExecutable { name } => format!("hide executable {name}"),
         }
     }

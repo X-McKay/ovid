@@ -77,11 +77,19 @@ fn optional_service_is_proven_by_passing_without_it() -> Result<(), ProveError> 
 }
 
 #[test]
-fn coupled_services_stay_unresolved_until_individually_varied() -> Result<(), ProveError> {
-    // Ground truth withheld from Ovid: postgres and kafka both vanish
-    // under the group treatment and the workload fails — neither may be
-    // called required (proposal §17.3 scenario 2).
+fn coupled_services_stay_unresolved_when_isolation_is_unavailable() -> Result<(), ProveError> {
+    // postgres and kafka both vanish under the group treatment and the
+    // workload fails (proposal §17.3 scenario 2). When the laboratory
+    // *cannot* isolate one dependency at a time, neither may be called
+    // required — the group stays honestly unresolved.
     let mut lab = FixtureLaboratory::new()
+        .with_capabilities(ovid_application::LabCapabilities {
+            deny_all_egress: true,
+            per_dependency_egress: false, // no gateway block available
+            clean_snapshot_restore: true,
+            observation: true,
+            ..Default::default()
+        })
         .with_baseline_outcomes(vec![TrialOutcome::passed()])
         .with_baseline_candidates(vec![
             external_candidate("postgres:5432", false),
@@ -103,6 +111,10 @@ fn coupled_services_stay_unresolved_until_individually_varied() -> Result<(), Pr
             .reason()
             .contains("individual variation"));
     }
+    assert!(
+        !lab.trials_run.iter().any(|l| l.starts_with("block-")),
+        "no block trials without per-dependency egress"
+    );
     Ok(())
 }
 
@@ -317,6 +329,59 @@ fn budget_is_spent_on_project_tooling_before_ubiquitous_utilities() -> Result<()
     assert_eq!(necessity_of("protoc"), Some(Necessity::Required));
     assert_eq!(necessity_of("cat"), Some(Necessity::Unresolved));
     assert!(report.limitations.iter().any(|l| l.contains("cat")));
+    Ok(())
+}
+
+#[test]
+fn coupled_services_resolve_to_individual_labels_via_block_trials() -> Result<(), ProveError> {
+    // postgres and kafka both vanish under the group deny-all screen and
+    // the workload fails — group-level (proposal §10.5 step 5). With
+    // per-dependency egress control the lab isolates each: blocking
+    // postgres alone fails (required), blocking kafka alone passes
+    // (optional).
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_candidates(vec![
+            external_candidate("postgres:5432", false),
+            external_candidate("kafka:9092", false),
+        ])
+        .with_no_egress_outcomes(vec![TrialOutcome::failed("connect refused")])
+        .with_no_egress_candidates(vec![
+            external_candidate("postgres:5432", true),
+            external_candidate("kafka:9092", true),
+        ])
+        // Blocking postgres alone: the workload fails.
+        .with_block_trial(
+            "postgres:5432",
+            vec![TrialOutcome::failed("db unreachable")],
+            vec![external_candidate("postgres:5432", true)],
+        )
+        // Blocking kafka alone: the workload still passes.
+        .with_block_trial(
+            "kafka:9092",
+            vec![TrialOutcome::passed()],
+            vec![external_candidate("kafka:9092", true)],
+        );
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    let necessity_of = |identity: &str| {
+        report
+            .conclusions
+            .iter()
+            .find(|c| c.conclusion.dependency().logical_identity == identity)
+            .map(|c| c.conclusion.necessity())
+    };
+    assert_eq!(necessity_of("postgres:5432"), Some(Necessity::Required));
+    assert_eq!(necessity_of("kafka:9092"), Some(Necessity::Optional));
+    assert!(
+        lab.trials_run
+            .iter()
+            .any(|l| l.starts_with("block-postgres")),
+        "postgres was isolated: {:?}",
+        lab.trials_run
+    );
+    assert!(matches!(report.world, WorldOutcome::Verified { .. }));
     Ok(())
 }
 

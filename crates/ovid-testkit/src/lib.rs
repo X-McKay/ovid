@@ -64,6 +64,8 @@ pub struct FixtureLaboratory {
     capabilities: LabCapabilities,
     baseline: TreatmentScript,
     no_egress: TreatmentScript,
+    /// Per-dependency scripts for `BlockDependency` trials.
+    block: BTreeMap<String, TreatmentScript>,
     /// Per-executable scripts for `HideExecutable` trials.
     hide: BTreeMap<String, TreatmentScript>,
     provision_outcome: Option<TrialOutcome>,
@@ -85,11 +87,13 @@ impl FixtureLaboratory {
                 vm_isolation: false,
                 clean_snapshot_restore: true,
                 deny_all_egress: true,
+                per_dependency_egress: true,
                 executable_hiding: true,
                 observation: true,
             },
             baseline: TreatmentScript::default(),
             no_egress: TreatmentScript::default(),
+            block: BTreeMap::new(),
             hide: BTreeMap::new(),
             provision_outcome: None,
             trials_run: Vec::new(),
@@ -125,6 +129,26 @@ impl FixtureLaboratory {
     /// same identities with `all_failed: true`).
     pub fn with_no_egress_candidates(mut self, candidates: Vec<NetworkCandidate>) -> Self {
         self.no_egress.candidates = candidates;
+        self
+    }
+
+    /// Script a `BlockDependency` trial for one logical identity: its
+    /// outcomes, and the candidates observed (the blocked one failing,
+    /// the rest reachable).
+    pub fn with_block_trial(
+        mut self,
+        identity: &str,
+        outcomes: Vec<TrialOutcome>,
+        candidates: Vec<NetworkCandidate>,
+    ) -> Self {
+        self.block.insert(
+            identity.to_string(),
+            TreatmentScript {
+                outcomes: outcomes.into(),
+                candidates,
+                executables: Vec::new(),
+            },
+        );
         self
     }
 
@@ -214,11 +238,16 @@ impl LaboratoryPort for FixtureLaboratory {
         let script = match &spec.treatment {
             Treatment::None => &mut self.baseline,
             Treatment::DenyAllEgress => &mut self.no_egress,
+            Treatment::BlockDependency { dependency } => self
+                .block
+                .entry(dependency.logical_identity.clone())
+                .or_default(),
             Treatment::HideExecutable { name } => self.hide.entry(name.clone()).or_default(),
         };
         let outcome = script.next_outcome();
         let observations = TrialObservations {
             network: script.candidates.clone(),
+            egress_intents: Vec::new(),
             executables: script.executables.clone(),
             observed: true,
             events_captured: (script.candidates.len() + script.executables.len()) as u64,

@@ -82,6 +82,15 @@ These come from the spec and are load-bearing; tests enforce most of them:
     a pristine fork of the frozen post-provision snapshot — full
     fidelity, including caches provisioning installed — and destroy the
     overlay after the result is persisted.
+15. **Egress is named, and `--egress deny` contacts nothing real**
+    (spec §13.10). The laboratory gateway records every destination a
+    workload tries to reach as intent evidence; under the default deny
+    posture the network namespace blocks direct sockets and the gateway
+    refuses proxied requests, so no real service is contacted. Never
+    make the gateway forward a request the policy refuses, never let a
+    credential-bearing upstream URL into config/evidence, and keep
+    `BlockDependency` an enforced single-dependency block (the gateway's
+    `ForwardExcept`), never a weakened approximation.
 
 ## Code conventions
 

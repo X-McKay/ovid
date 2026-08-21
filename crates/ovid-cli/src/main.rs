@@ -94,6 +94,12 @@ enum Command {
         /// (repeatable; names only, values come from the host).
         #[arg(long = "inherit-env")]
         inherit_env: Vec<String>,
+        /// Runtime egress posture: `deny` (default; no real external
+        /// traffic — a lab gateway names what the workload tried to
+        /// reach) or `allow` (gateway-mediated real egress, required to
+        /// classify network dependencies causally).
+        #[arg(long, default_value = "deny")]
+        egress: String,
         /// Skip the clean-replay verification step.
         #[arg(long = "no-replay")]
         no_replay: bool,
@@ -114,6 +120,10 @@ enum Command {
         guest_image: String,
         #[arg(long = "inherit-env")]
         inherit_env: Vec<String>,
+        /// Egress posture; use `allow` to re-verify a world proved with
+        /// real network access.
+        #[arg(long, default_value = "deny")]
+        egress: String,
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
     },
@@ -216,6 +226,7 @@ fn main() -> Result<()> {
             max_trials,
             timeout,
             inherit_env,
+            egress,
             no_replay,
             packs_dir,
             json,
@@ -231,6 +242,7 @@ fn main() -> Result<()> {
                 max_trials,
                 timeout_seconds: timeout,
                 extra_env: inherit_env,
+                egress: lab::EgressPolicy::parse(&egress)?,
                 no_replay,
                 packs_dir,
                 json,
@@ -243,6 +255,7 @@ fn main() -> Result<()> {
             backend,
             guest_image,
             inherit_env,
+            egress,
             timeout,
         } => {
             let code = prove_cmd::run_replay(
@@ -250,6 +263,7 @@ fn main() -> Result<()> {
                 lab::BackendKind::parse(&backend)?,
                 &guest_image,
                 &inherit_env,
+                lab::EgressPolicy::parse(&egress)?,
                 timeout,
             )?;
             std::process::exit(code);

@@ -47,6 +47,9 @@ pub struct ProveOptions {
     pub max_trials: usize,
     pub timeout_seconds: u64,
     pub extra_env: Vec<String>,
+    /// Runtime egress posture (deny = no real traffic, allow = gateway
+    /// mediated real egress for causal network classification).
+    pub egress: crate::lab::EgressPolicy,
     pub no_replay: bool,
     pub packs_dir: Option<PathBuf>,
     pub json: bool,
@@ -76,6 +79,9 @@ impl LedgerJournal {
             | JournalEvent::BaselineClassified { .. }
             | JournalEvent::DependencyClassified { .. }
             | JournalEvent::ReplayCompleted { .. } => TrustTier::T0,
+            // Gateway-observed egress intents are directly enforced by a
+            // trusted lab component (T1), not merely tool-derived.
+            JournalEvent::EgressObserved { .. } => TrustTier::T1,
             _ => TrustTier::T4,
         }
     }
@@ -248,6 +254,7 @@ pub fn run_prove(
         snapshot.source_digest.hex(),
         &out_dir.join(".lab"),
         &options.extra_env,
+        options.egress,
         registry,
     )
     .map_err(|e| anyhow!("{e}\nRun `ovid doctor` for host capability diagnostics."))?;
@@ -625,6 +632,31 @@ fn print_report(report: &ProveReport, out_dir: &Path) {
             println!("    {}", classified.conclusion.reason());
         }
     }
+    if !report.egress_intents.is_empty() {
+        let contacted = report
+            .egress_intents
+            .iter()
+            .any(|i| i.decision == "forwarded");
+        println!(
+            "\nEGRESS INTENTS ({})",
+            if contacted {
+                "gateway-forwarded"
+            } else {
+                "named only — nothing contacted"
+            }
+        );
+        for intent in &report.egress_intents {
+            let target = if intent.path.is_empty() {
+                format!("{}://{}:{}", intent.scheme, intent.host, intent.port)
+            } else {
+                format!(
+                    "{} {}://{}:{}{}",
+                    intent.method, intent.scheme, intent.host, intent.port, intent.path
+                )
+            };
+            println!("  {target}  [{}]", intent.decision);
+        }
+    }
     if !report.limitations.is_empty() {
         println!("\nLimitations");
         for limitation in &report.limitations {
@@ -644,6 +676,7 @@ pub fn run_replay(
     backend: BackendKind,
     guest_image: &str,
     extra_env: &[String],
+    egress: crate::lab::EgressPolicy,
     timeout_seconds: u64,
 ) -> Result<i32> {
     let proof_path = bundle.join("proof.json");
@@ -690,6 +723,7 @@ pub fn run_replay(
         snapshot.source_digest.hex(),
         &bundle.join(".lab"),
         extra_env,
+        egress,
         registry,
     )
     .map_err(|e| anyhow!("{e}"))?;
@@ -780,9 +814,22 @@ pub fn run_doctor() -> Result<()> {
     );
     if !userns {
         println!(
-            "       -> without `unshare -r -n`, network treatments cannot be enforced and \
-             candidates stay unresolved"
+            "       -> without `unshare -r -n`, egress denial is only partial (the lab \
+             gateway still names intents; direct sockets are not blocked)"
         );
+    }
+    let upstream = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok());
+    println!("[ok  ] egress gateway      names what workloads reach (deny = nothing contacted)");
+    match &upstream {
+        Some(url) => {
+            let shown = url.split('@').next_back().unwrap_or(url);
+            println!("       -> forward mode chains the host proxy ({shown})");
+        }
+        None => {
+            println!("       -> no host proxy detected; `--egress allow` reaches services directly")
+        }
     }
     println!(
         "[{}] msb                 microsandbox guest-VM laboratory (--backend microsandbox)",

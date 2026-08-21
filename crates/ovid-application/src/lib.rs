@@ -19,8 +19,8 @@ pub mod prove;
 pub mod workflow;
 
 pub use ports::{
-    ExecutableCandidate, JournalError, JournalEvent, JournalPort, LabCapabilities, LabError,
-    LaboratoryPort, NetworkCandidate, NullProgress, PreparedEnvironment, ProgressPort,
+    EgressIntent, ExecutableCandidate, JournalError, JournalEvent, JournalPort, LabCapabilities,
+    LabError, LaboratoryPort, NetworkCandidate, NullProgress, PreparedEnvironment, ProgressPort,
     ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
 };
 pub use prove::{

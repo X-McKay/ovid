@@ -61,6 +61,14 @@ The 0.2 surface (primary):
 - Safety default: a **remote** repository never executes on the host
   process — use the microsandbox guest VM, or opt in explicitly with
   `--trusted-process`.
+- **Egress by name, not by traffic.** A lab-controlled gateway names
+  every destination a workload tries to reach — scheme, host, port,
+  method, path — even when a loopback proxy hides it from the syscall
+  boundary. The default `--egress deny` contacts **nothing real**
+  (destinations are named and refused inside a network namespace);
+  `--egress allow` forwards through the host proxy to classify network
+  dependencies causally, and can block exactly one service at a time to
+  resolve a coupled group into individual required/optional labels.
 
 Supporting commands and machinery:
 
@@ -184,6 +192,10 @@ ovid prove . --workload test
 
 # ... or prove an explicit command
 ovid prove . --workload test -- make integration-test
+
+# Let the workload actually reach the network (gateway-mediated,
+# attributed) so network dependencies classify causally
+ovid prove . --workload test --egress allow
 
 # Prove a remote repository (guest VM; or add --trusted-process)
 ovid prove https://github.com/org/repo --backend microsandbox

@@ -41,6 +41,9 @@ pub struct LabCapabilities {
     pub clean_snapshot_restore: bool,
     /// Deny-all external egress with loopback intact.
     pub deny_all_egress: bool,
+    /// Block exactly one logical network dependency while others remain
+    /// reachable (per-dependency egress control via the gateway).
+    pub per_dependency_egress: bool,
     /// Hide a single executable from the search path for a trial.
     pub executable_hiding: bool,
     /// Boundary observation (process/file/network events) is captured.
@@ -54,6 +57,7 @@ impl LabCapabilities {
         match treatment {
             Treatment::None => true,
             Treatment::DenyAllEgress => self.deny_all_egress,
+            Treatment::BlockDependency { .. } => self.per_dependency_egress,
             Treatment::HideExecutable { .. } => self.executable_hiding,
         }
     }
@@ -120,10 +124,33 @@ pub struct ExecutableCandidate {
     pub resolver_hint: Option<String>,
 }
 
+/// One egress request the laboratory gateway named during a trial: what
+/// the workload tried to reach and what the policy did about it. The
+/// full record (method, path, decision) is richer than the host:port
+/// candidate it feeds, so it is preserved as its own evidence.
+#[derive(Clone, PartialEq, Eq, Serialize, Debug)]
+pub struct EgressIntent {
+    pub host: String,
+    pub port: u16,
+    /// `https` (CONNECT tunnel) or `http` (absolute-form request).
+    pub scheme: String,
+    /// `CONNECT`, or the HTTP method of a plain request.
+    pub method: String,
+    /// URL path for plain HTTP; empty for CONNECT (TLS is opaque).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// `refused` (nothing contacted), `forwarded`, or `forward-failed`.
+    pub decision: String,
+}
+
 /// What the laboratory's observer established during one trial.
 #[derive(Clone, PartialEq, Serialize, Debug, Default)]
 pub struct TrialObservations {
     pub network: Vec<NetworkCandidate>,
+    /// Named egress intents from the lab gateway (proxied destinations
+    /// the syscall boundary hides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_intents: Vec<EgressIntent>,
     /// Environment-provided executables the workload used or searched
     /// for (workspace-internal tools are provisioned content, not
     /// environment dependencies, and are excluded).
@@ -224,6 +251,12 @@ pub enum JournalEvent {
         label: String,
         passed: bool,
     },
+    /// Named egress intents from one trial's gateway — what the workload
+    /// tried to reach and whether anything was contacted.
+    EgressObserved {
+        trial: String,
+        intents: Vec<EgressIntent>,
+    },
     LimitationRecorded {
         detail: String,
     },
@@ -267,6 +300,7 @@ pub fn merge_candidates(trials: &[&TrialObservations]) -> Vec<NetworkCandidate> 
                 .entry(candidate.key.clone())
                 .and_modify(|existing| {
                     existing.attempts += candidate.attempts;
+                    existing.failures += candidate.failures;
                     existing.all_failed &= candidate.all_failed;
                     existing.externally_controlled |= candidate.externally_controlled;
                 })

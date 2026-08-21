@@ -15,8 +15,9 @@
 //! and is journaled before it appears in any projection.
 
 use crate::ports::{
-    merge_candidates, merge_executables, ExecutableCandidate, JournalError, JournalEvent,
-    JournalPort, LabError, LaboratoryPort, NetworkCandidate, ProgressPort, TrialResult, TrialSpec,
+    merge_candidates, merge_executables, EgressIntent, ExecutableCandidate, JournalError,
+    JournalEvent, JournalPort, LabError, LaboratoryPort, NetworkCandidate, ProgressPort,
+    TrialResult, TrialSpec,
 };
 use crate::workflow::{AnalysisState, Workflow};
 use ovid_domain::{
@@ -101,6 +102,9 @@ pub struct ProveReport {
     pub baseline: BaselineVerdict,
     /// External network dependencies observed during baseline (merged).
     pub network_candidates: Vec<NetworkCandidate>,
+    /// Named egress intents the lab gateway recorded (what the workload
+    /// tried to reach, and whether anything was contacted), deduplicated.
+    pub egress_intents: Vec<EgressIntent>,
     /// Environment-provided executables observed during baseline (merged).
     pub executable_candidates: Vec<ExecutableCandidate>,
     pub trials: Vec<TrialRecord>,
@@ -320,6 +324,12 @@ pub fn prove(
             duration_ms: result.duration_ms,
             output_tail: result.output_tail.clone(),
         })?;
+        if !result.observations.egress_intents.is_empty() {
+            journal.append(&JournalEvent::EgressObserved {
+                trial: result.record.label.clone(),
+                intents: result.observations.egress_intents.clone(),
+            })?;
+        }
         if let Some(signature) = &result.record.outcome.failure_signature {
             progress.emit(
                 "trial",
@@ -386,6 +396,17 @@ pub fn prove(
         .filter(|c| c.externally_controlled)
         .collect();
     let executable_candidates: Vec<ExecutableCandidate> = merge_executables(&baseline_observations);
+    // Named egress intents from the baseline posture — what the workload
+    // tried to reach — deduplicated for the report.
+    let mut egress_intents: Vec<EgressIntent> = Vec::new();
+    for observations in &baseline_observations {
+        for intent in &observations.egress_intents {
+            if !egress_intents.contains(intent) {
+                egress_intents.push(intent.clone());
+            }
+        }
+    }
+    egress_intents.sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
     workflow.advance(AnalysisState::CandidatesObserved);
     progress.emit(
         "observation",
@@ -516,11 +537,108 @@ pub fn prove(
                     .collect();
                 let variant_records: Vec<TrialRecord> =
                     variant_results.iter().map(|r| r.record.clone()).collect();
-                journal_conclusions(
-                    journal,
-                    &mut conclusions,
-                    classify_intervention(&baseline, &variant_records, &evidence),
-                )?;
+
+                // Was the group screen ambiguous? The workload failed with
+                // more than one externally-controlled dependency changing
+                // availability together (proposal §10.5 step 5's coupling
+                // case). If so, and the lab can block one dependency at a
+                // time, isolate each — otherwise accept the group verdict.
+                let group_failed = !variant_records.is_empty()
+                    && variant_records.iter().all(|t| !t.outcome.passed);
+                let changed: Vec<&NetworkCandidate> = screened
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        evidence
+                            .iter()
+                            .any(|e| e.key == c.key && e.unavailable_under_treatment)
+                    })
+                    .collect();
+                let can_isolate = lab.capabilities().can_enforce(&Treatment::BlockDependency {
+                    dependency: changed
+                        .first()
+                        .map(|c| c.key.clone())
+                        .unwrap_or_else(|| DependencyKey::network("placeholder:0")),
+                });
+
+                if group_failed && changed.len() > 1 && can_isolate {
+                    progress.emit(
+                        "experiments",
+                        &format!(
+                            "per-dependency egress isolation ({} services)",
+                            changed.len()
+                        ),
+                    );
+                    let runs_per = 1 + policy.confirmation_runs;
+                    let mut dropped: Vec<String> = Vec::new();
+                    for candidate in &changed {
+                        // Reserve one trial for replay verification.
+                        if trials_executed + runs_per + 1 > policy.max_trials {
+                            dropped.push(candidate.key.logical_identity.clone());
+                            continue;
+                        }
+                        let treatment = Treatment::BlockDependency {
+                            dependency: candidate.key.clone(),
+                        };
+                        let mut block_results: Vec<TrialResult> = Vec::new();
+                        for index in 1..=runs_per {
+                            match run_trial(
+                                lab,
+                                journal,
+                                &mut trials,
+                                &mut trials_executed,
+                                format!("block-{}-{index}", candidate.key.logical_identity),
+                                treatment.clone(),
+                            )? {
+                                Some(result) => block_results.push(result),
+                                None => break,
+                            }
+                        }
+                        // Only this dependency was blocked; enforcement
+                        // guarantees it was unavailable while the rest
+                        // stayed reachable — a single controlled change.
+                        let block_records: Vec<TrialRecord> =
+                            block_results.iter().map(|r| r.record.clone()).collect();
+                        journal_conclusions(
+                            journal,
+                            &mut conclusions,
+                            classify_intervention(
+                                &baseline,
+                                &block_records,
+                                &[network_evidence(candidate, true)],
+                            ),
+                        )?;
+                    }
+                    if !dropped.is_empty() {
+                        limitations.push(format!(
+                            "trial budget reached before per-dependency isolation of: {} \
+                             (raise --max-trials to resolve them)",
+                            dropped.join(", ")
+                        ));
+                        for identity in &dropped {
+                            journal_conclusions(
+                                journal,
+                                &mut conclusions,
+                                classify_intervention(
+                                    &baseline,
+                                    &[],
+                                    &[CandidateEvidence {
+                                        key: DependencyKey::network(identity),
+                                        externally_controlled: true,
+                                        unavailable_under_treatment: false,
+                                        attempted_in_baseline: true,
+                                    }],
+                                ),
+                            )?;
+                        }
+                    }
+                } else {
+                    journal_conclusions(
+                        journal,
+                        &mut conclusions,
+                        classify_intervention(&baseline, &variant_records, &evidence),
+                    )?;
+                }
             }
         }
 
@@ -730,6 +848,7 @@ pub fn prove(
         provision,
         baseline,
         network_candidates,
+        egress_intents,
         executable_candidates,
         trials,
         conclusions,
