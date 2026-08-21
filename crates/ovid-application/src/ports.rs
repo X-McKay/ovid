@@ -41,10 +41,6 @@ pub struct LabCapabilities {
     pub clean_snapshot_restore: bool,
     /// Deny-all external egress with loopback intact.
     pub deny_all_egress: bool,
-    /// Block exactly one logical network dependency.
-    pub per_dependency_egress: bool,
-    /// Remove a single environment variable for a trial.
-    pub env_removal: bool,
     /// Hide a single executable from the search path for a trial.
     pub executable_hiding: bool,
     /// Boundary observation (process/file/network events) is captured.
@@ -58,8 +54,6 @@ impl LabCapabilities {
         match treatment {
             Treatment::None => true,
             Treatment::DenyAllEgress => self.deny_all_egress,
-            Treatment::BlockDependency { .. } => self.per_dependency_egress,
-            Treatment::RemoveEnvVar { .. } => self.env_removal,
             Treatment::HideExecutable { .. } => self.executable_hiding,
         }
     }
@@ -108,10 +102,31 @@ pub struct NetworkCandidate {
     pub attempts: u64,
 }
 
+/// One environment-provided executable observed during a trial
+/// (proposal §10.4): either used successfully, or searched for and
+/// missing (a natural counterfactual seed when the baseline passes).
+#[derive(Clone, PartialEq, Eq, Serialize, Debug)]
+pub struct ExecutableCandidate {
+    /// Basename as resolved on the search path.
+    pub name: String,
+    /// Whether the run actually found/used it (`false` = searched and
+    /// demonstrably absent).
+    pub found: bool,
+    /// For a missing executable: the tool-resolver pack's install
+    /// candidate (`package via provider`), when one exists. A proposal
+    /// only — surfaced as remediation, never as evidence (ADR-007).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolver_hint: Option<String>,
+}
+
 /// What the laboratory's observer established during one trial.
 #[derive(Clone, PartialEq, Serialize, Debug, Default)]
 pub struct TrialObservations {
     pub network: Vec<NetworkCandidate>,
+    /// Environment-provided executables the workload used or searched
+    /// for (workspace-internal tools are provisioned content, not
+    /// environment dependencies, and are excluded).
+    pub executables: Vec<ExecutableCandidate>,
     /// Whether boundary observation actually ran (honesty over silence).
     pub observed: bool,
     pub events_captured: u64,
@@ -260,6 +275,26 @@ pub fn merge_candidates(trials: &[&TrialObservations]) -> Vec<NetworkCandidate> 
     merged.into_values().collect()
 }
 
+/// Merge executable candidates across trials: one success anywhere means
+/// the tool exists (`found`), mirroring the network merge rule.
+pub fn merge_executables(trials: &[&TrialObservations]) -> Vec<ExecutableCandidate> {
+    let mut merged: BTreeMap<String, ExecutableCandidate> = BTreeMap::new();
+    for observations in trials {
+        for candidate in &observations.executables {
+            merged
+                .entry(candidate.name.clone())
+                .and_modify(|existing| {
+                    existing.found |= candidate.found;
+                    if existing.resolver_hint.is_none() {
+                        existing.resolver_hint = candidate.resolver_hint.clone();
+                    }
+                })
+                .or_insert_with(|| candidate.clone());
+        }
+    }
+    merged.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,10 +307,36 @@ mod tests {
         };
         assert!(caps.can_enforce(&Treatment::None));
         assert!(caps.can_enforce(&Treatment::DenyAllEgress));
-        assert!(!caps.can_enforce(&Treatment::BlockDependency {
-            dependency: DependencyKey::network("db:5432"),
+        assert!(!caps.can_enforce(&Treatment::HideExecutable {
+            name: "protoc".into()
         }));
-        assert!(!caps.can_enforce(&Treatment::RemoveEnvVar { name: "X".into() }));
+    }
+
+    #[test]
+    fn merge_executables_prefers_found_and_keeps_hints() {
+        let a = TrialObservations {
+            executables: vec![ExecutableCandidate {
+                name: "protoc".into(),
+                found: false,
+                resolver_hint: Some("protobuf-compiler via apt".into()),
+            }],
+            ..Default::default()
+        };
+        let b = TrialObservations {
+            executables: vec![ExecutableCandidate {
+                name: "protoc".into(),
+                found: true,
+                resolver_hint: None,
+            }],
+            ..Default::default()
+        };
+        let merged = merge_executables(&[&a, &b]);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].found,
+            "one success anywhere means the tool exists"
+        );
+        assert!(merged[0].resolver_hint.is_some());
     }
 
     #[test]
@@ -288,7 +349,7 @@ mod tests {
                 attempts: 2,
             }],
             observed: true,
-            events_captured: 10,
+            ..Default::default()
         };
         let b = TrialObservations {
             network: vec![NetworkCandidate {
@@ -298,7 +359,7 @@ mod tests {
                 attempts: 1,
             }],
             observed: true,
-            events_captured: 10,
+            ..Default::default()
         };
         let merged = merge_candidates(&[&a, &b]);
         assert_eq!(merged.len(), 1);

@@ -127,6 +127,10 @@ pub struct WorldLock {
     pub metadata: WorldLockMetadata,
     pub policy: BTreeMap<String, String>,
     pub network: WorldNetwork,
+    /// Executables the workload requires beyond the base image (proven
+    /// via hide-executable trials, or provisioned by resolver packs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
     pub cells: Vec<WorldCell>,
     pub startup_order: Vec<String>,
     pub workload: WorkloadSpec,
@@ -265,6 +269,11 @@ impl WorldLock {
             network: WorldNetwork {
                 cidr: "10.203.0.0/24".into(),
                 dns,
+            },
+            tools: {
+                let mut tools = world.tools.clone();
+                tools.sort();
+                tools
             },
             cells,
             startup_order: startup,

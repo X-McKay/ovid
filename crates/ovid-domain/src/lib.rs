@@ -33,7 +33,10 @@ pub mod trial;
 pub mod world;
 
 pub use baseline::{assess_baseline, BaselineVerdict};
-pub use classify::{classify_intervention, classify_unenforceable, CausalConclusion, Necessity};
+pub use classify::{
+    classify_intervention, classify_natural_counterfactual, classify_unenforceable,
+    CausalConclusion, Necessity,
+};
 pub use dependency::{DependencyKey, DependencyKind};
 pub use scope::AnalysisScope;
 pub use trial::{

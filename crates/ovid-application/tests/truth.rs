@@ -3,8 +3,8 @@
 //! use case — the acceptance scenario of migration Phase 0.
 
 use ovid_application::{prove, JournalEvent, NullProgress, ProveError, ProvePolicy, ProveRequest};
-use ovid_domain::{AnalysisScope, Necessity, TrialOutcome, WorldOutcome};
-use ovid_testkit::{external_candidate, FixtureLaboratory, RecordingJournal};
+use ovid_domain::{AnalysisScope, DependencyKind, Necessity, TrialOutcome, WorldOutcome};
+use ovid_testkit::{executable_candidate, external_candidate, FixtureLaboratory, RecordingJournal};
 
 fn request() -> ProveRequest {
     ProveRequest {
@@ -156,6 +156,144 @@ fn unenforceable_treatment_yields_unresolved_not_weakened_experiments() -> Resul
     assert!(
         !lab.trials_run.iter().any(|l| l.starts_with("no-egress")),
         "an unenforceable treatment must not run at all"
+    );
+    Ok(())
+}
+
+#[test]
+fn hiding_a_required_executable_proves_it_required() -> Result<(), ProveError> {
+    // Ground truth (proposal §4.3's protoc example): the workload uses
+    // protoc during a passing baseline; with protoc hidden from the
+    // search path it fails 2/2 — required by individual variation.
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_executables(vec![executable_candidate("protoc", true)])
+        .with_hide_outcomes("protoc", vec![TrialOutcome::failed("protoc: not found")]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    let classified = &report.conclusions[0];
+    assert_eq!(
+        classified.conclusion.dependency().kind,
+        DependencyKind::Executable
+    );
+    assert_eq!(classified.conclusion.necessity(), Necessity::Required);
+    assert!(classified.conclusion.confidence() >= 0.9);
+    // 2 baseline + 2 hide + 1 replay; the required tool lands in the world.
+    assert_eq!(report.trials_executed, 5);
+    match &report.world {
+        WorldOutcome::Verified { world } => {
+            assert!(world
+                .world()
+                .candidate()
+                .required
+                .iter()
+                .any(|k| k.logical_identity == "protoc"));
+        }
+        other => panic!("expected verified world, got {}", other.label()),
+    }
+    Ok(())
+}
+
+#[test]
+fn hiding_an_optional_executable_proves_it_optional() -> Result<(), ProveError> {
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_executables(vec![executable_candidate("dot", true)])
+        .with_hide_outcomes("dot", vec![TrialOutcome::passed()]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    assert_eq!(
+        report.conclusions[0].conclusion.necessity(),
+        Necessity::Optional
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_executable_during_passing_baseline_is_a_natural_counterfactual() -> Result<(), ProveError>
+{
+    // The workload searched for `docker`, never found it, and passed
+    // anyway: optional without spending a single trial (§10.5 step 1).
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_executables(vec![executable_candidate("docker", false)]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    let classified = &report.conclusions[0];
+    assert_eq!(classified.conclusion.necessity(), Necessity::Optional);
+    assert!(classified
+        .conclusion
+        .reason()
+        .contains("natural counterfactual"));
+    assert!(
+        !lab.trials_run.iter().any(|l| l.starts_with("hide-")),
+        "a missing tool needs no hide trial"
+    );
+    // 2 baseline + 1 replay only.
+    assert_eq!(report.trials_executed, 3);
+    Ok(())
+}
+
+#[test]
+fn hide_trials_respect_the_budget_and_report_what_was_dropped() -> Result<(), ProveError> {
+    // Three executables but budget for only one hide pair after
+    // baseline + replay: the untested ones are reported unresolved with
+    // an explicit limitation — never silently skipped.
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_executables(vec![
+            executable_candidate("aa-tool", true),
+            executable_candidate("bb-tool", true),
+            executable_candidate("cc-tool", true),
+        ])
+        .with_hide_outcomes("aa-tool", vec![TrialOutcome::failed("missing")]);
+    let mut journal = RecordingJournal::default();
+    let tight = ProvePolicy {
+        max_trials: 5, // 2 baseline + 2 hide + 1 replay
+        ..ProvePolicy::default()
+    };
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &tight)?;
+
+    let necessity_of = |name: &str| {
+        report
+            .conclusions
+            .iter()
+            .find(|c| c.conclusion.dependency().logical_identity == name)
+            .map(|c| c.conclusion.necessity())
+    };
+    assert_eq!(necessity_of("aa-tool"), Some(Necessity::Required));
+    assert_eq!(necessity_of("bb-tool"), Some(Necessity::Unresolved));
+    assert_eq!(necessity_of("cc-tool"), Some(Necessity::Unresolved));
+    assert!(report
+        .limitations
+        .iter()
+        .any(|l| l.contains("bb-tool") && l.contains("cc-tool")));
+    // Budget respected AND replay still happened.
+    assert_eq!(report.trials_executed, 5);
+    assert!(matches!(report.world, WorldOutcome::Verified { .. }));
+    Ok(())
+}
+
+#[test]
+fn network_natural_counterfactual_skips_the_egress_trial() -> Result<(), ProveError> {
+    // The only network candidate already failed every attempt during the
+    // passing baseline: optional naturally; no deny-all trial needed.
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_candidates(vec![external_candidate("telemetry.corp:443", true)]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    assert_eq!(
+        report.conclusions[0].conclusion.necessity(),
+        Necessity::Optional
+    );
+    assert!(
+        !lab.trials_run.iter().any(|l| l.starts_with("no-egress")),
+        "already-demonstrated unavailability must not spend trials"
     );
     Ok(())
 }

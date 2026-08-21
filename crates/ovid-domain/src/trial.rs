@@ -10,6 +10,11 @@ use crate::dependency::DependencyKey;
 use serde::{Deserialize, Serialize};
 
 /// One controlled change applied to a trial (proposal §8.4).
+///
+/// The vocabulary deliberately contains only treatments a laboratory can
+/// *enforce* today; unenforceable treatments would be dead vocabulary
+/// that invites weakened experiments. New variants arrive together with
+/// their enforcement mechanism and capability flag.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(tag = "treatment", rename_all = "kebab-case")]
 pub enum Treatment {
@@ -18,11 +23,8 @@ pub enum Treatment {
     /// All external egress unavailable — the broad screening treatment
     /// (proposal §10.5 step 2). Loopback stays intact.
     DenyAllEgress,
-    /// Exactly one logical network dependency made unavailable.
-    BlockDependency { dependency: DependencyKey },
-    /// One environment variable removed from the workload environment.
-    RemoveEnvVar { name: String },
-    /// One executable hidden from the workload's search path.
+    /// Exactly one executable hidden from the workload's search path —
+    /// the per-dependency treatment for environment-provided tools.
     HideExecutable { name: String },
 }
 
@@ -37,10 +39,6 @@ impl Treatment {
         match self {
             Treatment::None => "none (baseline)".into(),
             Treatment::DenyAllEgress => "deny all external egress".into(),
-            Treatment::BlockDependency { dependency } => {
-                format!("block {}", dependency.describe())
-            }
-            Treatment::RemoveEnvVar { name } => format!("remove env var {name}"),
             Treatment::HideExecutable { name } => format!("hide executable {name}"),
         }
     }

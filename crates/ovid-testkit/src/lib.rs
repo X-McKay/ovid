@@ -13,12 +13,12 @@
 //! reports match what was actually applied.
 
 use ovid_application::{
-    JournalError, JournalEvent, JournalPort, LabCapabilities, LabError, LaboratoryPort,
-    NetworkCandidate, PreparedEnvironment, ProviderIdentity, SnapshotRef, TrialObservations,
-    TrialResult, TrialSpec,
+    ExecutableCandidate, JournalError, JournalEvent, JournalPort, LabCapabilities, LabError,
+    LaboratoryPort, NetworkCandidate, PreparedEnvironment, ProviderIdentity, SnapshotRef,
+    TrialObservations, TrialResult, TrialSpec,
 };
 use ovid_domain::{EnforcementReport, Treatment, TrialOutcome, TrialRecord};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 /// An in-memory journal that records every event and hands out
@@ -42,6 +42,8 @@ struct TreatmentScript {
     outcomes: VecDeque<TrialOutcome>,
     /// Network candidates observed during these trials.
     candidates: Vec<NetworkCandidate>,
+    /// Executable candidates observed during these trials.
+    executables: Vec<ExecutableCandidate>,
 }
 
 impl TreatmentScript {
@@ -62,6 +64,8 @@ pub struct FixtureLaboratory {
     capabilities: LabCapabilities,
     baseline: TreatmentScript,
     no_egress: TreatmentScript,
+    /// Per-executable scripts for `HideExecutable` trials.
+    hide: BTreeMap<String, TreatmentScript>,
     provision_outcome: Option<TrialOutcome>,
     /// Labels of every trial run, in order (for assertions).
     pub trials_run: Vec<String>,
@@ -81,13 +85,12 @@ impl FixtureLaboratory {
                 vm_isolation: false,
                 clean_snapshot_restore: true,
                 deny_all_egress: true,
-                per_dependency_egress: false,
-                env_removal: false,
-                executable_hiding: false,
+                executable_hiding: true,
                 observation: true,
             },
             baseline: TreatmentScript::default(),
             no_egress: TreatmentScript::default(),
+            hide: BTreeMap::new(),
             provision_outcome: None,
             trials_run: Vec::new(),
         }
@@ -128,6 +131,25 @@ impl FixtureLaboratory {
     /// Script the provisioning outcome.
     pub fn with_provision_outcome(mut self, outcome: TrialOutcome) -> Self {
         self.provision_outcome = Some(outcome);
+        self
+    }
+
+    /// Executable candidates observed during untreated trials.
+    pub fn with_baseline_executables(mut self, executables: Vec<ExecutableCandidate>) -> Self {
+        self.baseline.executables = executables;
+        self
+    }
+
+    /// Script the outcomes of `HideExecutable { name }` trials.
+    pub fn with_hide_outcomes(mut self, name: &str, outcomes: Vec<TrialOutcome>) -> Self {
+        self.hide.insert(
+            name.to_string(),
+            TreatmentScript {
+                outcomes: outcomes.into(),
+                candidates: Vec::new(),
+                executables: Vec::new(),
+            },
+        );
         self
     }
 }
@@ -189,16 +211,17 @@ impl LaboratoryPort for FixtureLaboratory {
             )));
         }
         self.trials_run.push(spec.label.clone());
-        let script = match spec.treatment {
+        let script = match &spec.treatment {
             Treatment::None => &mut self.baseline,
             Treatment::DenyAllEgress => &mut self.no_egress,
-            _ => &mut self.no_egress,
+            Treatment::HideExecutable { name } => self.hide.entry(name.clone()).or_default(),
         };
         let outcome = script.next_outcome();
         let observations = TrialObservations {
             network: script.candidates.clone(),
+            executables: script.executables.clone(),
             observed: true,
-            events_captured: script.candidates.len() as u64,
+            events_captured: (script.candidates.len() + script.executables.len()) as u64,
         };
         Ok(TrialResult {
             record: TrialRecord {
@@ -227,5 +250,14 @@ pub fn external_candidate(identity: &str, all_failed: bool) -> NetworkCandidate 
         externally_controlled: true,
         all_failed,
         attempts: 3,
+    }
+}
+
+/// Convenience: an environment-provided executable candidate.
+pub fn executable_candidate(name: &str, found: bool) -> ExecutableCandidate {
+    ExecutableCandidate {
+        name: name.to_string(),
+        found,
+        resolver_hint: None,
     }
 }

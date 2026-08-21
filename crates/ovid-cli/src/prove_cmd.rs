@@ -351,6 +351,12 @@ fn write_bundle(out_dir: &Path, report: &ProveReport, journal: &mut LedgerJourna
         };
         for key in &proposed.candidate().required {
             let identity = &key.logical_identity;
+            // Required executables are world tools; required network
+            // services become dependency cells (proposal §11.1).
+            if key.kind == ovid_domain::DependencyKind::Executable {
+                world.tools.push(identity.clone());
+                continue;
+            }
             let (host, port) = identity
                 .rsplit_once(':')
                 .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), Some(p))))

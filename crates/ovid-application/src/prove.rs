@@ -15,14 +15,14 @@
 //! and is journaled before it appears in any projection.
 
 use crate::ports::{
-    merge_candidates, JournalError, JournalEvent, JournalPort, LabError, LaboratoryPort,
-    ProgressPort, TrialResult, TrialSpec,
+    merge_candidates, merge_executables, ExecutableCandidate, JournalError, JournalEvent,
+    JournalPort, LabError, LaboratoryPort, NetworkCandidate, ProgressPort, TrialResult, TrialSpec,
 };
 use crate::workflow::{AnalysisState, Workflow};
 use ovid_domain::{
-    assess_baseline, classify_intervention, classify_unenforceable, AnalysisScope, BaselineVerdict,
-    CandidateEvidence, CausalConclusion, ReplayEvidence, Treatment, TrialRecord, WorldCandidate,
-    WorldOutcome,
+    assess_baseline, classify_intervention, classify_natural_counterfactual,
+    classify_unenforceable, AnalysisScope, BaselineVerdict, CandidateEvidence, CausalConclusion,
+    DependencyKey, ReplayEvidence, Treatment, TrialRecord, WorldCandidate, WorldOutcome,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -99,6 +99,10 @@ pub struct ProveReport {
     pub provision_argv: Option<Vec<String>>,
     pub provision: Option<TrialRecord>,
     pub baseline: BaselineVerdict,
+    /// External network dependencies observed during baseline (merged).
+    pub network_candidates: Vec<NetworkCandidate>,
+    /// Environment-provided executables observed during baseline (merged).
+    pub executable_candidates: Vec<ExecutableCandidate>,
     pub trials: Vec<TrialRecord>,
     pub conclusions: Vec<ClassifiedDependency>,
     pub world: WorldOutcome,
@@ -115,6 +119,25 @@ pub enum ProveError {
     Lab(#[from] LabError),
     #[error(transparent)]
     Journal(#[from] JournalError),
+}
+
+/// Journal a batch of freshly minted conclusions and record their
+/// evidence ids.
+fn journal_conclusions(
+    journal: &mut dyn JournalPort,
+    conclusions: &mut Vec<ClassifiedDependency>,
+    raw: Vec<CausalConclusion>,
+) -> Result<(), ProveError> {
+    for conclusion in raw {
+        let evidence = journal.append(&JournalEvent::DependencyClassified {
+            conclusion: conclusion.clone(),
+        })?;
+        conclusions.push(ClassifiedDependency {
+            conclusion,
+            evidence,
+        });
+    }
+    Ok(())
 }
 
 /// Run one clean, untreated trial from the snapshot — shared by baseline
@@ -212,7 +235,6 @@ pub fn prove(
         if *trials_executed >= policy.max_trials {
             return Ok(None);
         }
-        *trials_executed += 1;
         let result = lab.run_trial(
             &snapshot,
             &TrialSpec {
@@ -222,6 +244,7 @@ pub fn prove(
                 timeout_seconds: policy.timeout_seconds,
             },
         )?;
+        *trials_executed += 1;
         journal.append(&JournalEvent::TrialCompleted {
             record: result.record.clone(),
             exit_code: result.exit_code,
@@ -280,98 +303,256 @@ pub fn prove(
     }
 
     // ---------------------------------------- candidates + experiments
+    //
+    // The bounded scheduler (proposal §10.5): reuse natural
+    // counterfactuals first, screen the network group with one enforced
+    // deny-all intervention, then isolate individual executables with
+    // per-dependency hide treatments until the budget (minus a reserved
+    // replay trial) is spent. Anything the budget drops is reported —
+    // never silently capped.
     let stage_start = Instant::now();
     let baseline_observations: Vec<_> = baseline_results.iter().map(|r| &r.observations).collect();
-    let candidates: Vec<_> = merge_candidates(&baseline_observations)
+    let network_candidates: Vec<NetworkCandidate> = merge_candidates(&baseline_observations)
         .into_iter()
         .filter(|c| c.externally_controlled)
         .collect();
+    let executable_candidates: Vec<ExecutableCandidate> = merge_executables(&baseline_observations);
     workflow.advance(AnalysisState::CandidatesObserved);
     progress.emit(
         "observation",
-        &format!("{} external candidate(s)", candidates.len()),
+        &format!(
+            "{} network / {} executable candidate(s)",
+            network_candidates.len(),
+            executable_candidates.len()
+        ),
     );
 
+    let baseline_labels: Vec<String> = baseline_results
+        .iter()
+        .map(|r| r.record.label.clone())
+        .collect();
     let mut conclusions: Vec<ClassifiedDependency> = Vec::new();
-    if !candidates.is_empty() {
-        let treatment = Treatment::DenyAllEgress;
-        let raw_conclusions: Vec<CausalConclusion> = if !baseline.supports_experiments() {
-            let evidence: Vec<CandidateEvidence> = candidates
-                .iter()
-                .map(|c| CandidateEvidence {
-                    key: c.key.clone(),
-                    externally_controlled: c.externally_controlled,
-                    unavailable_under_treatment: false,
-                    attempted_in_baseline: true,
-                })
-                .collect();
-            classify_intervention(&baseline, &[], &evidence)
-        } else if !lab.capabilities().can_enforce(&treatment) {
-            let reason = "this laboratory cannot enforce deny-all egress";
-            limitations.push(format!(
-                "{reason}; every network candidate stays unresolved (the experiment is \
-                 never silently weakened)"
-            ));
-            let evidence: Vec<CandidateEvidence> = candidates
-                .iter()
-                .map(|c| CandidateEvidence {
-                    key: c.key.clone(),
-                    externally_controlled: c.externally_controlled,
-                    unavailable_under_treatment: false,
-                    attempted_in_baseline: true,
-                })
-                .collect();
-            classify_unenforceable(&evidence, &treatment, reason)
-        } else {
-            progress.emit("experiments", "deny-all-egress intervention");
-            let mut variant_results: Vec<TrialResult> = Vec::new();
-            for index in 1..=(1 + policy.confirmation_runs) {
-                match run_trial(
-                    lab,
+    let network_evidence = |c: &NetworkCandidate, unavailable: bool| CandidateEvidence {
+        key: c.key.clone(),
+        externally_controlled: c.externally_controlled,
+        unavailable_under_treatment: unavailable,
+        attempted_in_baseline: true,
+    };
+    // An environment-provided executable is outside the workload's own
+    // control (the experiment can vary it via the search path).
+    let executable_evidence = |name: &str, unavailable: bool| CandidateEvidence {
+        key: DependencyKey::executable(name),
+        externally_controlled: true,
+        unavailable_under_treatment: unavailable,
+        attempted_in_baseline: true,
+    };
+
+    if !baseline.supports_experiments() {
+        // No experiments can run; every observed candidate stays
+        // unresolved with the baseline reason.
+        let evidence: Vec<CandidateEvidence> = network_candidates
+            .iter()
+            .map(|c| network_evidence(c, false))
+            .chain(
+                executable_candidates
+                    .iter()
+                    .map(|e| executable_evidence(&e.name, !e.found)),
+            )
+            .collect();
+        journal_conclusions(
+            journal,
+            &mut conclusions,
+            classify_intervention(&baseline, &[], &evidence),
+        )?;
+    } else {
+        // Step 1 — natural counterfactuals (proposal §10.5 step 1):
+        // dependencies demonstrably unavailable while the baseline
+        // passed are optional without spending a trial.
+        let natural: Vec<CandidateEvidence> = network_candidates
+            .iter()
+            .filter(|c| c.all_failed)
+            .map(|c| network_evidence(c, true))
+            .chain(
+                executable_candidates
+                    .iter()
+                    .filter(|e| !e.found)
+                    .map(|e| executable_evidence(&e.name, true)),
+            )
+            .collect();
+        if !natural.is_empty() {
+            progress.emit(
+                "experiments",
+                &format!("{} natural counterfactual(s) reused", natural.len()),
+            );
+            journal_conclusions(
+                journal,
+                &mut conclusions,
+                classify_natural_counterfactual(&baseline, &baseline_labels, &natural),
+            )?;
+        }
+
+        // Step 2 — deny-all-egress screen for the network dependencies
+        // the baseline actually reached.
+        let screened: Vec<&NetworkCandidate> = network_candidates
+            .iter()
+            .filter(|c| !c.all_failed)
+            .collect();
+        if !screened.is_empty() {
+            let treatment = Treatment::DenyAllEgress;
+            if !lab.capabilities().can_enforce(&treatment) {
+                let reason = "this laboratory cannot enforce deny-all egress";
+                limitations.push(format!(
+                    "{reason}; every network candidate stays unresolved (the experiment \
+                     is never silently weakened)"
+                ));
+                let evidence: Vec<CandidateEvidence> = screened
+                    .iter()
+                    .map(|c| network_evidence(c, false))
+                    .collect();
+                journal_conclusions(
                     journal,
-                    &mut trials,
-                    &mut trials_executed,
-                    format!("no-egress-{index}"),
-                    treatment.clone(),
-                )? {
-                    Some(result) => variant_results.push(result),
-                    None => {
-                        limitations.push("trial budget exhausted during intervention".into());
-                        break;
+                    &mut conclusions,
+                    classify_unenforceable(&evidence, &treatment, reason),
+                )?;
+            } else {
+                progress.emit("experiments", "deny-all-egress intervention");
+                let mut variant_results: Vec<TrialResult> = Vec::new();
+                for index in 1..=(1 + policy.confirmation_runs) {
+                    match run_trial(
+                        lab,
+                        journal,
+                        &mut trials,
+                        &mut trials_executed,
+                        format!("no-egress-{index}"),
+                        treatment.clone(),
+                    )? {
+                        Some(result) => variant_results.push(result),
+                        None => {
+                            limitations.push("trial budget exhausted during intervention".into());
+                            break;
+                        }
+                    }
+                }
+                let variant_observations: Vec<_> =
+                    variant_results.iter().map(|r| &r.observations).collect();
+                let variant_merged = merge_candidates(&variant_observations);
+                let evidence: Vec<CandidateEvidence> = screened
+                    .iter()
+                    .map(|c| {
+                        let under_treatment = variant_merged.iter().find(|v| v.key == c.key);
+                        // Unavailable only when no variant run saw it
+                        // succeed (absence counts: it never got through).
+                        network_evidence(c, under_treatment.map(|v| v.all_failed).unwrap_or(true))
+                    })
+                    .collect();
+                let variant_records: Vec<TrialRecord> =
+                    variant_results.iter().map(|r| r.record.clone()).collect();
+                journal_conclusions(
+                    journal,
+                    &mut conclusions,
+                    classify_intervention(&baseline, &variant_records, &evidence),
+                )?;
+            }
+        }
+
+        // Step 3 — per-dependency isolation for executables the baseline
+        // used (proposal §10.5 step 5): hide exactly one tool per trial.
+        let hide_targets: Vec<&ExecutableCandidate> =
+            executable_candidates.iter().filter(|e| e.found).collect();
+        if !hide_targets.is_empty() {
+            if !lab.capabilities().executable_hiding {
+                let reason = "this laboratory cannot hide executables";
+                limitations.push(format!(
+                    "{reason}; {} executable candidate(s) stay unresolved",
+                    hide_targets.len()
+                ));
+                for exe in &hide_targets {
+                    let treatment = Treatment::HideExecutable {
+                        name: exe.name.clone(),
+                    };
+                    journal_conclusions(
+                        journal,
+                        &mut conclusions,
+                        classify_unenforceable(
+                            &[executable_evidence(&exe.name, false)],
+                            &treatment,
+                            reason,
+                        ),
+                    )?;
+                }
+            } else {
+                progress.emit(
+                    "experiments",
+                    &format!(
+                        "hide-executable trials ({} candidate(s))",
+                        hide_targets.len()
+                    ),
+                );
+                let runs_per_target = 1 + policy.confirmation_runs;
+                let mut dropped: Vec<String> = Vec::new();
+                for exe in &hide_targets {
+                    // Reserve one trial so replay verification stays
+                    // possible after the executable sweep.
+                    if trials_executed + runs_per_target + 1 > policy.max_trials {
+                        dropped.push(exe.name.clone());
+                        continue;
+                    }
+                    let treatment = Treatment::HideExecutable {
+                        name: exe.name.clone(),
+                    };
+                    let mut variant_records: Vec<TrialRecord> = Vec::new();
+                    let mut unsupported: Option<String> = None;
+                    for index in 1..=runs_per_target {
+                        match run_trial(
+                            lab,
+                            journal,
+                            &mut trials,
+                            &mut trials_executed,
+                            format!("hide-{}-{index}", exe.name),
+                            treatment.clone(),
+                        ) {
+                            Ok(Some(result)) => variant_records.push(result.record.clone()),
+                            Ok(None) => break,
+                            // The laboratory may discover per-target that
+                            // enforcement is impossible (e.g. the tool is
+                            // not resolved via the search path at all):
+                            // that one candidate stays unresolved, the
+                            // sweep continues.
+                            Err(ProveError::Lab(LabError::Unsupported(reason))) => {
+                                unsupported = Some(reason);
+                                break;
+                            }
+                            Err(other) => return Err(other),
+                        }
+                    }
+                    // Enforcement guarantees the tool was absent for the
+                    // whole trial, so unavailability is demonstrated.
+                    let evidence = vec![executable_evidence(&exe.name, true)];
+                    let raw = match unsupported {
+                        Some(reason) => classify_unenforceable(&evidence, &treatment, &reason),
+                        None => classify_intervention(&baseline, &variant_records, &evidence),
+                    };
+                    journal_conclusions(journal, &mut conclusions, raw)?;
+                }
+                if !dropped.is_empty() {
+                    limitations.push(format!(
+                        "trial budget reached before hide-executable trials for: {} \
+                         (raise --max-trials to test them)",
+                        dropped.join(", ")
+                    ));
+                    for name in &dropped {
+                        journal_conclusions(
+                            journal,
+                            &mut conclusions,
+                            classify_intervention(
+                                &baseline,
+                                &[],
+                                &[executable_evidence(name, false)],
+                            ),
+                        )?;
                     }
                 }
             }
-            let variant_observations: Vec<_> =
-                variant_results.iter().map(|r| &r.observations).collect();
-            let variant_merged = merge_candidates(&variant_observations);
-            let evidence: Vec<CandidateEvidence> = candidates
-                .iter()
-                .map(|c| {
-                    let under_treatment = variant_merged.iter().find(|v| v.key == c.key);
-                    CandidateEvidence {
-                        key: c.key.clone(),
-                        externally_controlled: c.externally_controlled,
-                        // Unavailable only when no variant run saw it
-                        // succeed (absence counts: it never got through).
-                        unavailable_under_treatment: under_treatment
-                            .map(|v| v.all_failed)
-                            .unwrap_or(true),
-                        attempted_in_baseline: true,
-                    }
-                })
-                .collect();
-            let variant_records: Vec<TrialRecord> =
-                variant_results.iter().map(|r| r.record.clone()).collect();
-            classify_intervention(&baseline, &variant_records, &evidence)
-        };
-        for conclusion in raw_conclusions {
-            let evidence = journal.append(&JournalEvent::DependencyClassified {
-                conclusion: conclusion.clone(),
-            })?;
-            conclusions.push(ClassifiedDependency {
-                conclusion,
-                evidence,
-            });
         }
     }
     workflow.advance(AnalysisState::ExperimentsCompleted);
@@ -474,6 +655,8 @@ pub fn prove(
         provision_argv: request.provision_argv.clone(),
         provision,
         baseline,
+        network_candidates,
+        executable_candidates,
         trials,
         conclusions,
         world,

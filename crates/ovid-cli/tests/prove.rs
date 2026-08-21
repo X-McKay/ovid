@@ -82,9 +82,28 @@ fn prove_truth_fixture_reaches_a_verified_world() {
         assert!(ledger.contains(kind), "missing {kind} in evidence.jsonl");
     }
 
-    // The lock's status reflects the domain outcome.
+    // Per-dependency isolation: grep and awk (used by the fixture's
+    // check script) are proven required via enforced hide-executable
+    // trials, and land in the world lock's tools.
+    let conclusions = proof["conclusions"].as_array().unwrap();
+    for tool in ["grep", "awk"] {
+        let conclusion = conclusions
+            .iter()
+            .map(|c| &c["conclusion"])
+            .find(|c| c["dependency"]["logical_identity"] == tool)
+            .unwrap_or_else(|| panic!("no conclusion for {tool}: {proof}"));
+        assert_eq!(conclusion["necessity"], "required", "{conclusion}");
+        assert!(conclusion["reason"]
+            .as_str()
+            .unwrap()
+            .contains("only this dependency changed availability"));
+    }
+
+    // The lock's status reflects the domain outcome, and required
+    // executables are recorded as world tools.
     let lock = std::fs::read_to_string(out.join("world.lock.yaml")).unwrap();
     assert!(lock.contains("status: verified"), "{lock}");
+    assert!(lock.contains("- awk") && lock.contains("- grep"), "{lock}");
 
     // Trial workspaces are destroyed after their results are persisted;
     // only the frozen snapshot remains under .lab.

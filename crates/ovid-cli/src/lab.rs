@@ -22,10 +22,10 @@
 
 use crate::pipeline::{BackendKind, OFFLINE_DEFAULT_ENV, ONLINE_DEFAULT_ENV};
 use ovid_application::{
-    LabCapabilities, LabError, LaboratoryPort, NetworkCandidate, PreparedEnvironment,
-    ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
+    ExecutableCandidate, LabCapabilities, LabError, LaboratoryPort, NetworkCandidate,
+    PreparedEnvironment, ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
 };
-use ovid_core::Digest;
+use ovid_core::{BoundaryEvent, Digest, EventEnvelope};
 use ovid_domain::{DependencyKey, EnforcementReport, Treatment, TrialOutcome, TrialRecord};
 use ovid_experiment::externally_controlled;
 use ovid_observer::aggregate;
@@ -153,6 +153,7 @@ impl HostLaboratory {
         argv: &[String],
         network: NetworkMode,
         inherit_env: &[String],
+        env: BTreeMap<String, String>,
         timeout_seconds: u64,
     ) -> Result<RunResult, LabError> {
         let mut spec = RunSpec::new(
@@ -162,6 +163,7 @@ impl HostLaboratory {
             },
         );
         spec.inherit_env = inherit_env.to_vec();
+        spec.env = env;
         spec.limits.wall_time = Duration::from_secs(timeout_seconds);
         spec.network = network;
         self.backend
@@ -186,7 +188,12 @@ impl HostLaboratory {
         })
     }
 
-    fn observations(&self, result: &RunResult) -> TrialObservations {
+    fn observations(
+        &self,
+        result: &RunResult,
+        spec: &TrialSpec,
+        trial_dir: &Path,
+    ) -> TrialObservations {
         let (events, observed) = match &result.observation {
             Some(observation) => (observation.events.clone(), true),
             None => (vec![], false),
@@ -206,9 +213,197 @@ impl HostLaboratory {
             .collect();
         TrialObservations {
             network: candidates,
+            executables: self.executable_candidates(&aggregated.events, spec, trial_dir),
             observed,
             events_captured: aggregated.events.len() as u64,
         }
+    }
+
+    /// Environment-provided executable candidates from one trial's events
+    /// (proposal §10.4): successful execs resolved outside the workspace
+    /// are `found`; a basename searched and never found (exec `ENOENT`,
+    /// or stat misses across ≥2 directories with no terminating hit) is
+    /// a missing tool. PATH-scan honesty: a probe that *found* its tool
+    /// (successful exec anywhere, or a stat hit in a `bin`/`sbin`
+    /// directory) is never reported missing.
+    fn executable_candidates(
+        &self,
+        events: &[EventEnvelope],
+        spec: &TrialSpec,
+        trial_dir: &Path,
+    ) -> Vec<ExecutableCandidate> {
+        // Launch plumbing, not workload dependencies: shells and `env`
+        // are how commands start, and the workload entry command itself
+        // is the subject of the analysis, not one of its dependencies.
+        const LAUNCHERS: &[&str] = &["sh", "bash", "dash", "env"];
+        let workload_entry = spec
+            .argv
+            .first()
+            .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
+            .unwrap_or_default();
+        let excluded =
+            |name: &str| LAUNCHERS.contains(&name) || name == workload_entry || name.is_empty();
+        let tool_found = |basename: &str| {
+            events.iter().any(|envelope| match &envelope.event {
+                BoundaryEvent::ProcessExec {
+                    path, errno: None, ..
+                } => path.rsplit('/').next() == Some(basename),
+                BoundaryEvent::FileOpened {
+                    path, errno: None, ..
+                } => path.rsplit_once('/').is_some_and(|(dir, base)| {
+                    base == basename && (dir.ends_with("/bin") || dir.ends_with("/sbin"))
+                }),
+                _ => false,
+            })
+        };
+
+        let mut found: std::collections::BTreeSet<String> = Default::default();
+        let mut missing: std::collections::BTreeSet<String> = Default::default();
+        // Successful execs of absolute paths outside the workspace: the
+        // environment supplied them, so the experiment can vary them.
+        // Workspace-internal tools are provisioned content, not
+        // environment dependencies.
+        for envelope in events {
+            if let BoundaryEvent::ProcessExec {
+                path, errno: None, ..
+            } = &envelope.event
+            {
+                if !path.starts_with('/') || Path::new(path).starts_with(trial_dir) {
+                    continue;
+                }
+                let basename = path.rsplit('/').next().unwrap_or(path);
+                if !excluded(basename) {
+                    found.insert(basename.to_string());
+                }
+            }
+        }
+        // Direct exec misses.
+        for envelope in events {
+            if let BoundaryEvent::ProcessExec {
+                path,
+                errno: Some(errno),
+                ..
+            } = &envelope.event
+            {
+                if errno == "ENOENT" {
+                    let basename = path.rsplit('/').next().unwrap_or(path);
+                    if !excluded(basename) && !found.contains(basename) && !tool_found(basename) {
+                        missing.insert(basename.to_string());
+                    }
+                }
+            }
+        }
+        // PATH-scan stat misses: the same basename missing from two or
+        // more directories with no terminating hit. Only resolver-known
+        // executables qualify — arbitrary stat misses (module probing,
+        // optional plugins) carry too little signal alone (spec §6.6).
+        let mut scan_dirs: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        for envelope in events {
+            if let BoundaryEvent::FileOpened {
+                path,
+                errno: Some(errno),
+                ..
+            } = &envelope.event
+            {
+                if errno == "ENOENT" {
+                    if let Some((dir, base)) = path.rsplit_once('/') {
+                        if !base.is_empty() && !base.contains('.') {
+                            scan_dirs
+                                .entry(base.to_string())
+                                .or_default()
+                                .insert(dir.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for (basename, dirs) in &scan_dirs {
+            if dirs.len() < 2
+                || excluded(basename)
+                || found.contains(basename)
+                || missing.contains(basename)
+                || tool_found(basename)
+                || self.registry.resolve_executable(basename).is_empty()
+            {
+                continue;
+            }
+            missing.insert(basename.clone());
+        }
+
+        found
+            .into_iter()
+            .map(|name| ExecutableCandidate {
+                name,
+                found: true,
+                resolver_hint: None,
+            })
+            .chain(missing.into_iter().map(|name| {
+                let hint = self
+                    .registry
+                    .resolve_executable(&name)
+                    .first()
+                    .map(|c| format!("{} via {}", c.package, c.provider));
+                ExecutableCandidate {
+                    name,
+                    found: false,
+                    resolver_hint: hint,
+                }
+            }))
+            .collect()
+    }
+
+    /// Build a PATH-shadow directory for `HideExecutable`: every
+    /// executable reachable through the host search path is linked into
+    /// one directory, except the hidden target. Setting `PATH` to this
+    /// directory alone makes the treatment enforceable and verifiable —
+    /// the target demonstrably cannot be resolved, while everything else
+    /// resolves exactly once.
+    fn build_shim_path(&mut self, hidden: &str) -> Result<PathBuf, LabError> {
+        let host_path = std::env::var("PATH")
+            .map_err(|_| LabError::Unsupported("host PATH is not set".into()))?;
+        self.trial_counter += 1;
+        let shim = self.lab_dir.join(format!("shim-{:03}", self.trial_counter));
+        if shim.exists() {
+            std::fs::remove_dir_all(&shim)
+                .map_err(|e| LabError::Preparation(format!("clear shim dir: {e}")))?;
+        }
+        std::fs::create_dir_all(&shim)
+            .map_err(|e| LabError::Preparation(format!("create shim dir: {e}")))?;
+        let mut target_existed = false;
+        for dir in std::env::split_paths(&host_path) {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy().into_owned();
+                if name_str == hidden {
+                    target_existed = true;
+                    continue;
+                }
+                let link = shim.join(&name);
+                if link.exists() {
+                    continue; // first PATH hit wins, like real resolution
+                }
+                #[cfg(unix)]
+                let _ = std::os::unix::fs::symlink(entry.path(), &link);
+            }
+        }
+        if !target_existed {
+            let _ = std::fs::remove_dir_all(&shim);
+            return Err(LabError::Unsupported(format!(
+                "`{hidden}` is not resolved via the host search path; hiding it there \
+                 would not vary the dependency"
+            )));
+        }
+        // Verify the enforcement precondition before the trial runs.
+        if shim.join(hidden).exists() {
+            let _ = std::fs::remove_dir_all(&shim);
+            return Err(LabError::Preparation(format!(
+                "shim construction failed: {hidden} still resolvable"
+            )));
+        }
+        Ok(shim)
     }
 
     fn record(
@@ -247,9 +442,10 @@ impl LaboratoryPort for HostLaboratory {
             vm_isolation: matches!(self.kind, BackendKind::Microsandbox),
             clean_snapshot_restore: true,
             deny_all_egress,
-            per_dependency_egress: false,
-            env_removal: false,
-            executable_hiding: false,
+            // PATH shadowing controls host-process resolution only; the
+            // guest VM has its own search path, so the guest laboratory
+            // honestly does not claim it yet.
+            executable_hiding: matches!(self.kind, BackendKind::Process),
             observation: matches!(self.kind, BackendKind::Microsandbox)
                 || ovid_observer::strace_available(),
         }
@@ -270,6 +466,7 @@ impl LaboratoryPort for HostLaboratory {
                     argv,
                     NetworkMode::Inherit,
                     &self.online_env.clone(),
+                    BTreeMap::new(),
                     3600,
                 )?;
                 Some(Self::record(
@@ -324,10 +521,12 @@ impl LaboratoryPort for HostLaboratory {
         snapshot: &SnapshotRef,
         spec: &TrialSpec,
     ) -> Result<TrialResult, LabError> {
-        let (network, inherit_env, enforcement) = match &spec.treatment {
+        let mut shim_dir: Option<PathBuf> = None;
+        let (network, inherit_env, env, enforcement) = match &spec.treatment {
             Treatment::None => (
                 NetworkMode::Inherit,
                 self.online_env.clone(),
+                BTreeMap::new(),
                 EnforcementReport::enforced(Treatment::None, "host-network"),
             ),
             Treatment::DenyAllEgress => {
@@ -341,17 +540,39 @@ impl LaboratoryPort for HostLaboratory {
                 (
                     NetworkMode::Isolated,
                     self.offline_env.clone(),
+                    BTreeMap::new(),
                     EnforcementReport::enforced(
                         Treatment::DenyAllEgress,
                         self.isolation_mechanism(),
                     ),
                 )
             }
-            other => {
-                return Err(LabError::Unsupported(format!(
-                    "treatment `{}` is not supported by this laboratory",
-                    other.describe()
-                )))
+            Treatment::HideExecutable { name } => {
+                if !self.capabilities().executable_hiding {
+                    return Err(LabError::Unsupported(
+                        "executable hiding is only enforceable in the host-process \
+                         laboratory (the guest VM resolves its own search path)"
+                            .into(),
+                    ));
+                }
+                // Exactly one controlled change: network posture and
+                // environment stay identical to the baseline; only the
+                // search path loses one tool.
+                let shim = self.build_shim_path(name)?;
+                let env = BTreeMap::from([("PATH".to_string(), shim.display().to_string())]);
+                let inherit: Vec<String> = self
+                    .online_env
+                    .iter()
+                    .filter(|v| v.as_str() != "PATH")
+                    .cloned()
+                    .collect();
+                shim_dir = Some(shim);
+                (
+                    NetworkMode::Inherit,
+                    inherit,
+                    env,
+                    EnforcementReport::enforced(spec.treatment.clone(), "path-shadow"),
+                )
             }
         };
         // Fork: every trial gets a pristine copy of the frozen snapshot.
@@ -371,9 +592,10 @@ impl LaboratoryPort for HostLaboratory {
             &spec.argv,
             network,
             &inherit_env,
+            env,
             spec.timeout_seconds,
         )?;
-        let observations = self.observations(&result);
+        let observations = self.observations(&result, spec, &trial_dir);
         let record = Self::record(&spec.label, spec.treatment.clone(), enforcement, &result);
         let output_tail = format!("{}\n{}", result.stdout_tail, result.stderr_tail);
         let trial = TrialResult {
@@ -383,8 +605,12 @@ impl LaboratoryPort for HostLaboratory {
             duration_ms: result.duration.as_millis() as u64,
             output_tail,
         };
-        // Destroy the overlay after result persistence (proposal §14.5).
+        // Destroy the overlay (and any shim) after result persistence
+        // (proposal §14.5).
         let _ = std::fs::remove_dir_all(&trial_dir);
+        if let Some(shim) = shim_dir {
+            let _ = std::fs::remove_dir_all(&shim);
+        }
         Ok(trial)
     }
 
@@ -432,8 +658,8 @@ mod tests {
         assert!(caps.clean_snapshot_restore);
         assert_eq!(caps.deny_all_egress, network_isolation_available());
         assert!(
-            !caps.per_dependency_egress,
-            "not implemented -> not claimed"
+            caps.executable_hiding,
+            "the process laboratory enforces PATH shadowing"
         );
     }
 }

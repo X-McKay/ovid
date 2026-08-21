@@ -102,6 +102,38 @@ pub fn classify_unenforceable(
         .collect()
 }
 
+/// Reuse a natural counterfactual (proposal §10.5 step 1): a dependency
+/// that was *demonstrably unavailable during a stable passing baseline*
+/// (every attempt failed, or a searched executable was absent) is
+/// `optional` in scope without spending a single intervention trial —
+/// the baseline itself is the experiment. Candidates whose
+/// unavailability was not demonstrated are not returned; they proceed to
+/// controlled interventions.
+pub fn classify_natural_counterfactual(
+    baseline: &BaselineVerdict,
+    baseline_trials: &[String],
+    candidates: &[CandidateEvidence],
+) -> Vec<CausalConclusion> {
+    let BaselineVerdict::StablePassing { runs } = baseline else {
+        return Vec::new();
+    };
+    let confidence = if *runs >= 2 { 0.9 } else { 0.75 };
+    candidates
+        .iter()
+        .filter(|c| c.externally_controlled && c.unavailable_under_treatment)
+        .map(|candidate| CausalConclusion {
+            dependency: candidate.key.clone(),
+            necessity: Necessity::Optional,
+            reason: format!(
+                "workload passed {runs}/{runs} baseline runs while this dependency was \
+                 demonstrably unavailable (natural counterfactual)"
+            ),
+            trials: baseline_trials.to_vec(),
+            confidence,
+        })
+        .collect()
+}
+
 /// Classify the candidates affected by one intervention: a set of trials
 /// that all applied the same treatment, compared against the baseline
 /// verdict (proposal §10.7).
@@ -363,6 +395,33 @@ mod tests {
             &[candidate("postgres:5432", true, true)],
         );
         assert_eq!(conclusions[0].necessity(), Necessity::Unresolved);
+    }
+
+    #[test]
+    fn natural_counterfactual_makes_unavailable_dependencies_optional() {
+        let conclusions = classify_natural_counterfactual(
+            &stable_baseline(),
+            &["baseline-1".into(), "baseline-2".into()],
+            &[
+                candidate("redis:6379", true, true), // unavailable during baseline
+                candidate("postgres:5432", false, true), // available -> not returned
+            ],
+        );
+        assert_eq!(conclusions.len(), 1, "only the demonstrated one classifies");
+        assert_eq!(conclusions[0].necessity(), Necessity::Optional);
+        assert!(conclusions[0].reason().contains("natural counterfactual"));
+        assert_eq!(conclusions[0].trials().len(), 2);
+    }
+
+    #[test]
+    fn natural_counterfactual_requires_a_stable_passing_baseline() {
+        let unstable = assess_baseline(&[TrialOutcome::passed(), TrialOutcome::failed("f")]);
+        assert!(classify_natural_counterfactual(
+            &unstable,
+            &["baseline-1".into()],
+            &[candidate("redis:6379", true, true)],
+        )
+        .is_empty());
     }
 
     #[test]
