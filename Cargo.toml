@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ovid-core",
+    "crates/ovid-evidence",
+    "crates/ovid-repository",
+    "crates/ovid-inventory",
+    "crates/ovid-packs",
+    "crates/ovid-planner",
+    "crates/ovid-observer",
+    "crates/ovid-sandbox",
+    "crates/ovid-gateway",
+    "crates/ovid-experiment",
+    "crates/ovid-world",
+    "crates/ovid-output",
+    "crates/ovid-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/X-McKay/ovid"
+rust-version = "1.80"
+
+[workspace.dependencies]
+# Internal crates
+ovid-core = { path = "crates/ovid-core" }
+ovid-evidence = { path = "crates/ovid-evidence" }
+ovid-repository = { path = "crates/ovid-repository" }
+ovid-inventory = { path = "crates/ovid-inventory" }
+ovid-packs = { path = "crates/ovid-packs" }
+ovid-planner = { path = "crates/ovid-planner" }
+ovid-observer = { path = "crates/ovid-observer" }
+ovid-sandbox = { path = "crates/ovid-sandbox" }
+ovid-gateway = { path = "crates/ovid-gateway" }
+ovid-experiment = { path = "crates/ovid-experiment" }
+ovid-world = { path = "crates/ovid-world" }
+ovid-output = { path = "crates/ovid-output" }
+
+# External crates. Versions are pinned at the minor level; `Cargo.lock` is
+# committed so builds are reproducible (spec §12.4).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "2.0"
+anyhow = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3.10"
+regex = "1.10"
+libc = "0.2"
+walkdir = "2.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Perf tests time real work; keep some optimization in test profile so the
+# thresholds in tests/perf are meaningful without a release build.
+[profile.test]
+opt-level = 1

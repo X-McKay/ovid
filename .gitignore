@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+/ovid-output/
+/validation-workdir/
+*.jsonl.zst
+.DS_Store

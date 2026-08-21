@@ -1,0 +1,17 @@
+[package]
+name = "ovid-evidence"
+description = "Immutable, hash-chained evidence ledger, claim store, and confidence model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ovid-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
