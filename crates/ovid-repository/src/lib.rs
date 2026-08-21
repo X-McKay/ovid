@@ -140,7 +140,7 @@ pub fn acquire(source: &RepositorySource, options: &AcquireOptions) -> Result<Re
                 .canonicalize()
                 .map_err(|e| OvidError::Repository(format!("bad path {}: {e}", path.display())))?;
             let revision = git_revision(&root).unwrap_or_else(|| "workdir".to_string());
-            fingerprint(source.canonical_url(), revision, None, &root, options)
+            fingerprint(format!("file://{}", root.display()), revision, None, &root, options)
         }
         RepositorySource::GitUrl { url, reference } => {
             let clone_dir = clone_target_dir(&options.workdir, url, reference.as_deref());
