@@ -178,6 +178,23 @@ pub struct ExternalSystemReport {
     /// `unresolved`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub treatment: Option<String>,
+    /// URL path from a declaration (`/v1`): how the resource is addressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_path: Option<String>,
+    /// Environment variable that binds this endpoint's host at runtime.
+    /// Connectivity is declared even though the destination is not: the
+    /// value is external input Ovid cannot see (§6.6 — unknown, not
+    /// absent). Name only, never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
+    /// Environment variable *names* declared as credentials for this
+    /// endpoint (`api_key_env:` conventions). Names only (§12.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_env: Vec<String>,
+    /// Repository locations declaring this endpoint: `file (key.path)` or
+    /// `file:line (VAR)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_sources: Vec<String>,
     /// Evidence ids supporting this entry (G-8: every conclusion links).
     #[serde(default)]
     pub evidence: Vec<String>,

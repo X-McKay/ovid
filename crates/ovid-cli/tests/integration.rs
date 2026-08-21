@@ -537,6 +537,92 @@ fn compose_services_appear_as_declared_external_systems() {
 }
 
 #[test]
+fn declared_endpoints_and_env_indirection_are_reported() {
+    let out = temp_out("endpoints");
+    let fixture = fixtures().join("declared-endpoints");
+    let (ok, _, stderr) = run_ovid(&[
+        "analyze",
+        fixture.to_str().unwrap(),
+        "--workloads",
+        "test",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "analyze failed: {stderr}");
+    let manifest = load_manifest(&out);
+    let external = manifest["external_systems"].as_array().unwrap();
+
+    // Literal config URL: declared-only record with scheme-derived
+    // protocol, pack-derived default port, path, and the credential env
+    // *name* from the sibling `api_key_env` key.
+    let model = external
+        .iter()
+        .find(|s| s["id"] == "models.fixture-lab.dev:443")
+        .expect("declared endpoint present: {external:?}");
+    assert_eq!(model["identity"], "declared");
+    assert_eq!(model["declared"], true);
+    assert_eq!(model["protocol"], "https");
+    assert_eq!(model["port"], 443, "default port from the https pack");
+    assert_eq!(model["url_path"], "/v1");
+    assert_eq!(model["attempts"], 0);
+    assert!(
+        model["causality"].is_null(),
+        "declaration earns no causality"
+    );
+    assert_eq!(model["credential_env"][0], "FIXTURE_MODEL_KEY");
+    assert!(model["declared_sources"][0]
+        .as_str()
+        .unwrap()
+        .contains("config/inference.yaml (model_endpoint.base_url)"));
+
+    // Env-parameterized endpoints: connectivity is declared even though
+    // the host is bound at runtime; scheme/path context is preserved.
+    let telemetry = external
+        .iter()
+        .find(|s| s["id"] == "env:TELEMETRY_HOST")
+        .expect("env-parameterized endpoint present");
+    assert_eq!(telemetry["identity"], "env-parameterized");
+    assert_eq!(telemetry["env_var"], "TELEMETRY_HOST");
+    assert_eq!(telemetry["protocol"], "https");
+    assert_eq!(telemetry["url_path"], "/ingest");
+    assert!(external.iter().any(|s| s["id"] == "env:FIXTURE_DB_HOST"));
+
+    // Source-mined env reads (T5): captured with template context and
+    // shipped defaults; non-endpoint vars (LOG_LEVEL) are not.
+    let inference = external
+        .iter()
+        .find(|s| s["id"] == "env:INFERENCE_HOST")
+        .expect("source-mined endpoint present");
+    assert_eq!(inference["url_path"], "/v2/complete");
+    assert!(inference["declared_sources"][0]
+        .as_str()
+        .unwrap()
+        .contains("client.py"));
+    let model_url = external
+        .iter()
+        .find(|s| s["id"] == "env:MODEL_URL")
+        .expect("getenv default captured");
+    assert_eq!(model_url["port"], 8080);
+    assert!(!external.iter().any(|s| s["id"] == "env:LOG_LEVEL"));
+
+    // Env-parameterized endpoints are unresolved (host unknown by
+    // construction), never guessed (§6.6).
+    let unresolved = manifest["unresolved"].as_array().unwrap();
+    assert!(unresolved.iter().any(|u| u["id"] == "env:TELEMETRY_HOST"
+        && u["reason"]
+            .as_str()
+            .unwrap()
+            .contains("bound at runtime from env var TELEMETRY_HOST")));
+
+    // Ledger + claims carry the declarations with the right tiers.
+    let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();
+    assert!(ledger_text.contains("endpoint-declared"));
+    let claims_text = std::fs::read_to_string(out.join("claims.json")).unwrap();
+    assert!(claims_text.contains("service:models.fixture-lab.dev"));
+    assert!(claims_text.contains("service:env:INFERENCE_HOST"));
+}
+
+#[test]
 fn successful_package_opens_promote_loaded_state() {
     let out = temp_out("loaded");
     let repo = temp_out("loaded-repo");

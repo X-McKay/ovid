@@ -14,6 +14,7 @@
 //! into.
 
 pub mod compose;
+pub mod endpoints;
 pub mod languages;
 pub mod provider;
 pub mod purl;
@@ -23,6 +24,7 @@ use ovid_repository::RepoSnapshot;
 use serde::{Deserialize, Serialize};
 
 pub use compose::{scan_compose, DeclaredService};
+pub use endpoints::{scan_endpoints, DeclaredEndpoint, EndpointOrigin};
 pub use languages::{detect_languages, LanguageStat};
 pub use purl::purl;
 

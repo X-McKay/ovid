@@ -1,0 +1,10 @@
+# Benchmark-run style config: a literal endpoint plus a credential env
+# name and an env-parameterized telemetry collector.
+model_endpoint:
+  base_url: https://models.fixture-lab.dev/v1
+  model_id: fixture-model
+  api_key_env: FIXTURE_MODEL_KEY
+telemetry:
+  collector: https://${TELEMETRY_HOST}/ingest
+database:
+  host: ${FIXTURE_DB_HOST}

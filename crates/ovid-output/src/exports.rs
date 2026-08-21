@@ -160,6 +160,10 @@ mod tests {
             outcomes: vec!["ECONNREFUSED".into()],
             causality: Some(ovid_core::CausalClassification::Required),
             treatment: Some("service-pack:postgres".into()),
+            url_path: None,
+            env_var: None,
+            credential_env: Vec::new(),
+            declared_sources: Vec::new(),
             evidence: vec!["evidence:1".into()],
         });
         manifest

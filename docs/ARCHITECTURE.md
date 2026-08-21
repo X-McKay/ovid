@@ -79,6 +79,18 @@ are parsed into *declared* external systems (service, image, container
 ports) that merge with observed destinations only on a name match —
 port-only coincidence stays two records (§6.6).
 
+Declared endpoints extend that dimension beyond Compose: a generic miner
+(`ovid-inventory::endpoints`) extracts service-scheme URL literals from
+structured config files (T4) and environment-bound indirections — config
+placeholders (`https://${LLM_HOST}/v1`), `*_env:` convention keys, and
+`getenv`-family reads of endpoint-named variables in source (T5,
+proposal-only per ADR-007). An env-bound endpoint is reported as
+`env-parameterized` external connectivity with everything the text
+supports (scheme, URL path, shipped default, credential env *names* —
+never values) and listed as unresolved rather than guessed; host matches
+merge onto observed systems, and scheme default ports come from protocol
+packs, not core code (ADR-005).
+
 ## Resolution and causality
 
 After each run, `ovid-gateway` groups socket events into external-system

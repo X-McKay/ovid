@@ -318,6 +318,164 @@ fn absorb_declared_services(
                 .image
                 .clone()
                 .map(|image| format!("declared-image:{image}")),
+            url_path: None,
+            env_var: None,
+            credential_env: Vec::new(),
+            declared_sources: vec![service.source_file.clone()],
+            evidence: vec![evidence_id.to_string()],
+        });
+    }
+    Ok(())
+}
+
+/// Map a URL scheme onto the canonical protocol name used by protocol
+/// packs, so scheme knowledge stays aligned with the pack registry
+/// (ADR-005: the packs remain the authority on protocols).
+fn scheme_protocol_name(scheme: &str) -> Option<&'static str> {
+    Some(match scheme {
+        "http" | "ws" => "http",
+        "https" | "wss" => "https",
+        "postgres" | "postgresql" => "postgresql",
+        "redis" | "rediss" => "redis",
+        "mysql" => "mysql",
+        "mongodb" | "mongodb+srv" => "mongodb",
+        "amqp" | "amqps" => "amqp",
+        "kafka" => "kafka",
+        "smtp" | "smtps" => "smtp",
+        _ => return None,
+    })
+}
+
+/// Absorb declared endpoints — literal config URLs and env-var-bound
+/// indirections — into the manifest (§6.6, §25.3). A declaration merges
+/// onto an observed system when the host matches; otherwise it appends a
+/// declared-only record. An env-parameterized endpoint (host supplied at
+/// runtime by an environment variable whose value Ovid cannot see) is
+/// reported with everything the text *does* support — scheme, path,
+/// default, credential variable names — and listed as unresolved rather
+/// than guessed. Declaration never sets dynamic states (§6.3).
+fn absorb_declared_endpoints(
+    ctx: &mut Context,
+    manifest: &mut Manifest,
+    snapshot: &RepoSnapshot,
+) -> Result<()> {
+    let endpoints = ovid_inventory::scan_endpoints(snapshot);
+    let repo_subject = format!("repository:{}", snapshot.canonical_url);
+    for endpoint in endpoints {
+        let tier = match endpoint.origin {
+            ovid_inventory::EndpointOrigin::Config => TrustTier::T4,
+            ovid_inventory::EndpointOrigin::SourceMined => TrustTier::T5,
+        };
+        let evidence_id = ctx.record(
+            "endpoint-declared",
+            "ovid-inventory",
+            tier,
+            serde_json::to_value(&endpoint)?,
+            None,
+        )?;
+        let object = match (&endpoint.host, &endpoint.env_var) {
+            (Some(host), _) => format!("service:{host}"),
+            (None, Some(var)) => format!("service:env:{var}"),
+            (None, None) => continue,
+        };
+        ctx.claim(
+            "declares",
+            repo_subject.clone(),
+            object,
+            ClaimStates::default().with(ClaimState::Declared),
+            vec![evidence_id.clone()],
+        );
+        // Port: explicit beats scheme default; the default comes from the
+        // protocol pack for the scheme, not hardcoded knowledge.
+        let protocol_name = endpoint.scheme.as_deref().and_then(scheme_protocol_name);
+        let default_port = protocol_name.and_then(|name| {
+            ctx.registry
+                .protocol_packs()
+                .find(|(_, p)| p.system == name)
+                .and_then(|(_, p)| p.matcher.ports.first().copied())
+        });
+        let port = endpoint.port.or(default_port).unwrap_or(0);
+        // Merge onto an observed or compose-declared system with the same
+        // host identity; anything weaker would be guessing (§6.6).
+        if let Some(host) = &endpoint.host {
+            if let Some(existing) = manifest
+                .external_systems
+                .iter_mut()
+                .find(|s| s.dns_name.as_deref() == Some(host.as_str()) || s.address == *host)
+            {
+                existing.declared = true;
+                if existing.url_path.is_none() {
+                    existing.url_path = endpoint.path.clone();
+                }
+                for cred in &endpoint.credential_env {
+                    if !existing.credential_env.contains(cred) {
+                        existing.credential_env.push(cred.clone());
+                    }
+                }
+                for source in &endpoint.sources {
+                    if !existing.declared_sources.contains(source) {
+                        existing.declared_sources.push(source.clone());
+                    }
+                }
+                existing.evidence.push(evidence_id.to_string());
+                continue;
+            }
+        }
+        let protocol = protocol_name
+            .map(str::to_string)
+            .or_else(|| endpoint.scheme.clone())
+            .or_else(|| {
+                ctx.registry
+                    .classify_protocol(port, None)
+                    .map(|(_, p)| p.system.clone())
+            })
+            .unwrap_or_else(|| "unknown".into());
+        let (id, address, identity) = match (&endpoint.host, &endpoint.env_var) {
+            (Some(host), _) => (
+                format!("{host}:{port}"),
+                host.clone(),
+                "declared".to_string(),
+            ),
+            (None, Some(var)) => (
+                format!("env:{var}"),
+                format!("${{{var}}}"),
+                "env-parameterized".to_string(),
+            ),
+            (None, None) => unreachable!("filtered above"),
+        };
+        if let (None, Some(var)) = (&endpoint.host, &endpoint.env_var) {
+            let mut detail = format!("endpoint host bound at runtime from env var {var}");
+            if let Some(scheme) = &endpoint.scheme {
+                detail.push_str(&format!(" (scheme {scheme}"));
+                if let Some(path) = &endpoint.path {
+                    detail.push_str(&format!(", path {path}"));
+                }
+                detail.push(')');
+            }
+            manifest.unresolved.push(UnresolvedItem {
+                id: id.clone(),
+                reason: detail,
+                evidence: vec![evidence_id.to_string()],
+            });
+        }
+        manifest.external_systems.push(ExternalSystemReport {
+            id,
+            protocol,
+            address,
+            port,
+            dns_name: endpoint.host.clone(),
+            endpoints: Vec::new(),
+            identity,
+            declared: true,
+            attempts: 0,
+            failures: 0,
+            outcomes: Vec::new(),
+            causality: None,
+            treatment: None,
+            url_path: endpoint.path.clone(),
+            env_var: endpoint.env_var.clone(),
+            credential_env: endpoint.credential_env.clone(),
+            declared_sources: endpoint.sources.clone(),
             evidence: vec![evidence_id.to_string()],
         });
     }
@@ -552,6 +710,10 @@ fn absorb_execution(
             outcomes: observation.outcomes.clone(),
             causality,
             treatment: None,
+            url_path: None,
+            env_var: None,
+            credential_env: Vec::new(),
+            declared_sources: Vec::new(),
             evidence: claim.supports.iter().map(|e| e.to_string()).collect(),
         });
     }
@@ -789,6 +951,7 @@ pub fn run_inventory(
         .limitations
         .push("inventory mode: no code was executed; dynamic states are unknown".into());
     absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
+    absorb_declared_endpoints(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, None)?;
     Ok(Bundle {
         manifest,
@@ -851,6 +1014,7 @@ pub fn run_observe(
             .push("strace unavailable: boundary observation was not captured".into());
     }
     absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
+    absorb_declared_endpoints(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, None)?;
     Ok(Bundle {
         manifest,
@@ -1026,6 +1190,7 @@ pub fn run_analyze(
         .limitations
         .push("dynamic analysis is limited to the executed workloads".into());
     absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
+    absorb_declared_endpoints(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, lock.as_ref())?;
     Ok(Bundle {
         manifest,
@@ -1461,6 +1626,7 @@ pub fn run_tomography(
         .limitations
         .push("dynamic analysis is limited to the executed workloads".into());
     absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
+    absorb_declared_endpoints(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest, lock.as_ref())?;
     Ok(Bundle {
         manifest,
