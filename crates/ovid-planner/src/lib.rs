@@ -238,6 +238,16 @@ pub fn plan(snapshot: &RepoSnapshot, registry: &PackRegistry) -> ActionGraph {
         if is_shell_builtin(&command) {
             return; // unexecutable script fragment
         }
+        // A repo-relative launcher (`./mvnw`, `./gradlew`) is only a real
+        // candidate when the repository actually ships that file — runner
+        // recipes offer wrapper-first conventions for whole ecosystems,
+        // and proposing a wrapper the repo lacks manufactures a failure
+        // the repository does not have.
+        if let Some(relative) = command.first().and_then(|c| c.strip_prefix("./")) {
+            if !snapshot.files.contains_key(relative) {
+                return;
+            }
+        }
         counter += 1;
         let kind = kind_hint.unwrap_or_else(|| classify(&command));
         // Rank real test runners above lint/check commands that share the
@@ -351,6 +361,41 @@ mod tests {
         .unwrap();
         std::mem::forget(dir);
         snap
+    }
+
+    #[test]
+    fn wrapper_candidates_require_the_wrapper_file() {
+        // jsoup case: a Maven repo without mvnw/gradlew must not get
+        // wrapper commands proposed — they fail for a reason the repo
+        // does not have.
+        let registry = PackRegistry::builtin().unwrap();
+        let bare = plan(&snapshot_with(&[("pom.xml", "<project/>")]), &registry);
+        let commands: Vec<String> = bare
+            .candidates(ActionKind::Test)
+            .iter()
+            .chain(bare.candidates(ActionKind::Build).iter())
+            .map(|a| a.command.join(" "))
+            .collect();
+        assert!(
+            commands
+                .iter()
+                .all(|c| !c.starts_with("./mvnw") && !c.starts_with("./gradlew")),
+            "{commands:?}"
+        );
+        assert!(
+            commands.iter().any(|c| c.starts_with("mvn ")),
+            "{commands:?}"
+        );
+
+        // With the wrapper shipped, the wrapper command is offered.
+        let wrapped = plan(
+            &snapshot_with(&[("pom.xml", "<project/>"), ("mvnw", "#!/bin/sh\n")]),
+            &registry,
+        );
+        assert!(wrapped
+            .candidates(ActionKind::Test)
+            .iter()
+            .any(|a| a.command.join(" ").starts_with("./mvnw")));
     }
 
     #[test]
