@@ -1,0 +1,12 @@
+[package]
+name = "ovid-testkit"
+description = "Deterministic test doubles for Ovid: the scripted fixture laboratory and scenario builders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ovid-domain = { workspace = true }
+ovid-application = { workspace = true }

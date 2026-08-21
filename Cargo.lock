@@ -408,6 +408,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "ovid-application"
+version = "0.1.0"
+dependencies = [
+ "ovid-core",
+ "ovid-domain",
+ "ovid-testkit",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ovid-cli"
 version = "0.1.0"
 dependencies = [
@@ -441,6 +453,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "ovid-domain"
+version = "0.1.0"
+dependencies = [
+ "ovid-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -565,6 +586,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "ovid-testkit"
+version = "0.1.0"
+dependencies = [
+ "ovid-application",
+ "ovid-domain",
 ]
 
 [[package]]

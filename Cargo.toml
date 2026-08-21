@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "crates/ovid-core",
+    "crates/ovid-domain",
+    "crates/ovid-application",
+    "crates/ovid-testkit",
     "crates/ovid-evidence",
     "crates/ovid-repository",
     "crates/ovid-inventory",
@@ -26,6 +29,9 @@ rust-version = "1.85"
 [workspace.dependencies]
 # Internal crates
 ovid-core = { path = "crates/ovid-core" }
+ovid-domain = { path = "crates/ovid-domain" }
+ovid-application = { path = "crates/ovid-application" }
+ovid-testkit = { path = "crates/ovid-testkit" }
 ovid-evidence = { path = "crates/ovid-evidence" }
 ovid-repository = { path = "crates/ovid-repository" }
 ovid-inventory = { path = "crates/ovid-inventory" }
