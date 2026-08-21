@@ -1148,18 +1148,52 @@ fn synthesize_world(
     lock
 }
 
-/// Tomography mode: run each workload twice — first in an isolated
-/// network namespace (deny-all egress, loopback intact), then with
-/// network access — and classify external dependencies from the
-/// comparison (spec §20's counterfactual discipline applied to the
-/// network group). One bundle carries both runs, the classification
-/// evidence, and the synthesized world.
+/// Tomography mode: the comprehensive single-command pipeline.
+///
+/// acquire -> inventory (+ Compose declarations) -> plan -> **provision**
+/// (best discovered install candidate, online, in one persistent
+/// workspace — the dependency-installed layer of §16.5) -> for each
+/// requested workload kind, up to `max_candidates` discovered commands,
+/// each run **twice**: network-isolated, then with network — and external
+/// dependencies classified from the counterfactual pair (§20). Every
+/// discovered-but-unexecuted candidate is disclosed in completeness so
+/// gated tiers (live/db test targets) never silently vanish.
+pub struct TomographyOptions {
+    pub in_place: bool,
+    pub extra_inherit_env: Vec<String>,
+    pub timeout_seconds: u64,
+    /// Run up to this many discovered candidates per workload kind.
+    pub max_candidates: usize,
+    /// Skip the default PATH/HOME/proxy inheritance (fully scrubbed env).
+    pub no_default_env: bool,
+}
+
+/// Environment the online legs get by default: toolchain discovery plus
+/// proxy/CA plumbing (the online leg exists to have network access).
+const ONLINE_DEFAULT_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "CARGO_HTTP_CAINFO",
+];
+/// Offline legs only need toolchain discovery; the namespace blocks egress.
+const OFFLINE_DEFAULT_ENV: &[&str] = &["PATH", "HOME"];
+
 pub fn run_tomography(
     locator: &str,
     reference: Option<String>,
     workload_kinds: &[String],
     out: &Path,
-    options: &ExecutionOptions,
+    options: &TomographyOptions,
     packs_dir: Option<&Path>,
 ) -> Result<Bundle> {
     let mut ctx = Context::open(out, packs_dir)?;
@@ -1188,37 +1222,104 @@ pub fn run_tomography(
                 .into(),
         );
     }
-    // Without namespace isolation, the best-effort offline posture is a
-    // scrubbed environment with proxy variables removed.
-    let proxy_vars = [
-        "https_proxy",
-        "HTTPS_PROXY",
-        "http_proxy",
-        "HTTP_PROXY",
-        "all_proxy",
-        "ALL_PROXY",
-    ];
-    let offline_options = ExecutionOptions {
-        in_place: options.in_place,
-        inherit_env: if isolation {
-            options.inherit_env.clone()
-        } else {
-            options
-                .inherit_env
-                .iter()
-                .filter(|v| !proxy_vars.contains(&v.as_str()))
-                .cloned()
-                .collect()
-        },
+
+    let mut online_env: Vec<String> = if options.no_default_env {
+        vec![]
+    } else {
+        ONLINE_DEFAULT_ENV.iter().map(|v| v.to_string()).collect()
+    };
+    let mut offline_env: Vec<String> = if options.no_default_env {
+        vec![]
+    } else {
+        OFFLINE_DEFAULT_ENV.iter().map(|v| v.to_string()).collect()
+    };
+    for var in &options.extra_inherit_env {
+        if !online_env.contains(var) {
+            online_env.push(var.clone());
+        }
+        if !offline_env.contains(var) {
+            offline_env.push(var.clone());
+        }
+    }
+    // Without namespace isolation, best-effort offline strips proxy vars.
+    if !isolation {
+        let proxy_vars = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
+        offline_env.retain(|v| !proxy_vars.contains(&v.as_str()));
+    }
+
+    // One persistent workspace for the whole pipeline: provisioning
+    // effects (installed dependencies) must be visible to the workload
+    // runs (§16.5's dependency-installed layer).
+    let workspace_root = if options.in_place {
+        snapshot.root.clone()
+    } else {
+        let workspace = out.join(".workspace");
+        if !workspace.exists() {
+            ovid_sandbox::materialize_workspace(&snapshot.root, &workspace)
+                .map_err(|e| anyhow!("materialize workspace: {e}"))?;
+        }
+        workspace
+    };
+    let make_options = |inherit: &[String]| ExecutionOptions {
+        in_place: true, // all runs share the provisioned workspace
+        inherit_env: inherit.to_vec(),
         timeout_seconds: options.timeout_seconds,
         counterfactual_env: vec![],
     };
-    let offline_network = if isolation {
-        NetworkMode::Isolated
-    } else {
-        NetworkMode::Inherit
-    };
+    let online_options = make_options(&online_env);
+    let offline_options = make_options(&offline_env);
+    // A snapshot pointing at the persistent workspace for execution.
+    let mut exec_snapshot = snapshot.clone();
+    exec_snapshot.root = workspace_root;
 
+    // ------------------------------------------------------------------
+    // Provisioning: best discovered install candidate, online, once.
+    // Observed like any workload (its downloads are evidence), but not a
+    // counterfactual pair — it exists to create the world, not test it.
+    // ------------------------------------------------------------------
+    let predicate = SuccessPredicate::ExitCode { expected: 0 };
+    if let Some(install) = graph.candidates(ActionKind::DependencyInstall).first() {
+        manifest.build.commands.push(install.command.clone());
+        ctx.record(
+            "action-selected",
+            "ovid-planner",
+            install.source.trust_tier(),
+            serde_json::json!({
+                "workload": "provision",
+                "command": install.command,
+                "source": install.source,
+                "source_file": install.source_file,
+                "score": install.score,
+            }),
+            None,
+        )?;
+        let provisioning = execute_workload(
+            &mut ctx,
+            &exec_snapshot,
+            &install.command,
+            &online_options,
+            "provision",
+            NetworkMode::Inherit,
+        )?;
+        absorb_execution(
+            &mut ctx,
+            &mut manifest,
+            &provisioning,
+            "provision",
+            &install.command,
+            &predicate,
+        )?;
+        manifest.completeness.limitations.push(
+            "provisioning (install) ran online only: it prepares the world and is not \
+             part of the counterfactual comparison"
+                .into(),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Workload pairs: up to max_candidates per requested kind.
+    // ------------------------------------------------------------------
+    let mut executed_commands: Vec<Vec<String>> = Vec::new();
     let mut last_online: Option<(WorkloadExecution, Vec<String>)> = None;
     for kind_name in workload_kinds {
         let kind = match kind_name.as_str() {
@@ -1228,184 +1329,120 @@ pub fn run_tomography(
             "start" => ActionKind::Start,
             other => bail!("unknown workload kind {other:?} (use build|test|install|start)"),
         };
+        if kind == ActionKind::DependencyInstall {
+            continue; // provisioning already covered install
+        }
         let candidates = graph.candidates(kind);
-        let Some(action) = candidates.first() else {
+        if candidates.is_empty() {
             manifest
                 .completeness
                 .limitations
                 .push(format!("no {kind_name} candidate command was discovered"));
             continue;
-        };
-        manifest.build.commands.push(action.command.clone());
-        ctx.record(
-            "action-selected",
-            "ovid-planner",
-            action.source.trust_tier(),
-            serde_json::json!({
-                "workload": kind_name,
-                "command": action.command,
-                "source": action.source,
-                "source_file": action.source_file,
-                "score": action.score,
-            }),
-            None,
-        )?;
-        let predicate = SuccessPredicate::ExitCode { expected: 0 };
-
-        // Run 1: network-isolated (the counterfactual condition).
-        let offline_name = format!("{kind_name}-offline");
-        let offline = execute_workload(
-            &mut ctx,
-            &snapshot,
-            &action.command,
-            &offline_options,
-            &offline_name,
-            offline_network,
-        )?;
-        absorb_execution(
-            &mut ctx,
-            &mut manifest,
-            &offline,
-            &offline_name,
-            &action.command,
-            &predicate,
-        )?;
-
-        // Run 2: network available (the baseline condition).
-        let online_name = format!("{kind_name}-online");
-        let online = execute_workload(
-            &mut ctx,
-            &snapshot,
-            &action.command,
-            options,
-            &online_name,
-            NetworkMode::Inherit,
-        )?;
-        absorb_execution(
-            &mut ctx,
-            &mut manifest,
-            &online,
-            &online_name,
-            &action.command,
-            &predicate,
-        )?;
-
-        let offline_passed = offline.result.success();
-        let online_passed = online.result.success();
-
-        // Pair observations across runs by stable identity.
-        let offline_map: BTreeMap<String, &ovid_gateway::ExternalObservation> = offline
-            .network
-            .external
-            .iter()
-            .map(|o| (o.identity(), o))
-            .collect();
-        let online_map: BTreeMap<String, &ovid_gateway::ExternalObservation> = online
-            .network
-            .external
-            .iter()
-            .map(|o| (o.identity(), o))
-            .collect();
-        let identities: std::collections::BTreeSet<String> = offline_map
-            .keys()
-            .chain(online_map.keys())
-            .cloned()
-            .collect();
-
-        // The controlled group: externally-controlled dependencies that
-        // were unavailable offline and available online — what the
-        // intervention actually varied.
-        let controlled_group: Vec<String> = identities
-            .iter()
-            .filter(|identity| {
-                let offline_obs = offline_map.get(*identity).copied();
-                let online_obs = online_map.get(*identity).copied();
-                let controlled = offline_obs
-                    .or(online_obs)
-                    .map(externally_controlled)
-                    .unwrap_or(false);
-                let offline_unavailable = offline_obs.map(|o| o.all_failed()).unwrap_or(true);
-                let online_available = online_obs.map(|o| !o.all_failed()).unwrap_or(false);
-                controlled && offline_unavailable && online_available
-            })
-            .cloned()
-            .collect();
-        if controlled_group.len() > 1 && !offline_passed && online_passed {
-            manifest.completeness.limitations.push(format!(
-                "network counterfactual for {kind_name} is group-level: {} dependencies \
-                 changed availability together ({}); per-dependency causality needs \
-                 individual variation",
-                controlled_group.len(),
-                controlled_group.join(", ")
-            ));
         }
-
-        for identity in &identities {
-            let pair = NetworkCounterfactual {
-                offline: offline_map.get(identity).copied(),
-                online: online_map.get(identity).copied(),
+        for (index, action) in candidates
+            .iter()
+            .take(options.max_candidates.max(1))
+            .enumerate()
+        {
+            if executed_commands.contains(&action.command) {
+                continue;
+            }
+            executed_commands.push(action.command.clone());
+            let label = if index == 0 {
+                kind_name.clone()
+            } else {
+                format!("{kind_name}-{}", index + 1)
             };
-            let verdict = classify_network_counterfactual(
-                &pair,
-                offline_passed,
-                online_passed,
-                controlled_group.len(),
-            );
-            let evidence_id = ctx.record(
-                "experiment-outcome",
-                "ovid-experiment",
-                TrustTier::T0,
+            manifest.build.commands.push(action.command.clone());
+            ctx.record(
+                "action-selected",
+                "ovid-planner",
+                action.source.trust_tier(),
                 serde_json::json!({
-                    "condition": "network-isolated",
-                    "workload": kind_name,
-                    "dependency": identity,
-                    "offline_passed": offline_passed,
-                    "online_passed": online_passed,
-                    "classification": verdict.classification,
-                    "group_level": verdict.group_level,
-                    "isolation": if isolation { "user-netns" } else { "proxy-env-strip" },
+                    "workload": label,
+                    "command": action.command,
+                    "source": action.source,
+                    "source_file": action.source_file,
+                    "score": action.score,
                 }),
-                Some(offline.run_id.clone()),
+                None,
             )?;
-            match verdict.classification {
-                CausalClassification::Required => {
-                    ctx.claim(
-                        "requires",
-                        format!("workload:{kind_name}"),
-                        format!("service:{identity}"),
-                        ClaimStates::default()
-                            .with(ClaimState::Attempted)
-                            .with(ClaimState::CausallyRequired),
-                        vec![evidence_id.clone()],
-                    );
-                }
-                CausalClassification::Optional => {
-                    ctx.claim(
-                        "optionally-uses",
-                        format!("workload:{kind_name}"),
-                        format!("service:{identity}"),
-                        ClaimStates::default().with(ClaimState::Attempted),
-                        vec![evidence_id.clone()],
-                    );
-                }
-                _ => {}
-            }
-            // Override the per-run causality with the counterfactual
-            // verdict on the matching manifest record.
-            for system in &mut manifest.external_systems {
-                let system_identity = format!(
-                    "{}:{}",
-                    system.dns_name.as_deref().unwrap_or(&system.address),
-                    system.port
-                );
-                if &system_identity == identity {
-                    system.causality = Some(verdict.classification);
-                    system.evidence.push(evidence_id.to_string());
-                }
-            }
-        }
 
-        last_online = Some((online, action.command.clone()));
+            let offline_name = format!("{label}-offline");
+            let offline = execute_workload(
+                &mut ctx,
+                &exec_snapshot,
+                &action.command,
+                &offline_options,
+                &offline_name,
+                if isolation {
+                    NetworkMode::Isolated
+                } else {
+                    NetworkMode::Inherit
+                },
+            )?;
+            absorb_execution(
+                &mut ctx,
+                &mut manifest,
+                &offline,
+                &offline_name,
+                &action.command,
+                &predicate,
+            )?;
+
+            let online_name = format!("{label}-online");
+            let online = execute_workload(
+                &mut ctx,
+                &exec_snapshot,
+                &action.command,
+                &online_options,
+                &online_name,
+                NetworkMode::Inherit,
+            )?;
+            absorb_execution(
+                &mut ctx,
+                &mut manifest,
+                &online,
+                &online_name,
+                &action.command,
+                &predicate,
+            )?;
+
+            classify_pair(
+                &mut ctx,
+                &mut manifest,
+                &label,
+                &offline,
+                &online,
+                isolation,
+            )?;
+            last_online = Some((online, action.command.clone()));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Disclosure: everything discovered but not executed (§25.2/§25.3 —
+    // the gated-tier case: a `test-live` target that needs a database
+    // must be visible even though it was not run).
+    // ------------------------------------------------------------------
+    for action in &graph.actions {
+        if executed_commands.contains(&action.command) {
+            continue;
+        }
+        if manifest.completeness.workloads_not_executed.len() >= 12 {
+            manifest
+                .completeness
+                .workloads_not_executed
+                .push("… further candidates truncated".into());
+            break;
+        }
+        manifest.completeness.workloads_not_executed.push(format!(
+            "{:?}: `{}` ({})",
+            action.kind,
+            action.command.join(" "),
+            action.source_file.as_deref().unwrap_or("mined"),
+        ));
     }
 
     let lock = last_online.as_ref().map(|(execution, argv)| {
@@ -1429,6 +1466,126 @@ pub fn run_tomography(
         out_dir: out.to_path_buf(),
         lock,
     })
+}
+
+/// Counterfactual classification for one offline/online pair (extracted
+/// from the per-kind loop; see `ovid-experiment::network` for the rules).
+fn classify_pair(
+    ctx: &mut Context,
+    manifest: &mut Manifest,
+    kind_name: &str,
+    offline: &WorkloadExecution,
+    online: &WorkloadExecution,
+    isolation: bool,
+) -> Result<()> {
+    let offline_passed = offline.result.success();
+    let online_passed = online.result.success();
+    let offline_map: BTreeMap<String, &ovid_gateway::ExternalObservation> = offline
+        .network
+        .external
+        .iter()
+        .map(|o| (o.identity(), o))
+        .collect();
+    let online_map: BTreeMap<String, &ovid_gateway::ExternalObservation> = online
+        .network
+        .external
+        .iter()
+        .map(|o| (o.identity(), o))
+        .collect();
+    let identities: std::collections::BTreeSet<String> = offline_map
+        .keys()
+        .chain(online_map.keys())
+        .cloned()
+        .collect();
+
+    let controlled_group: Vec<String> = identities
+        .iter()
+        .filter(|identity| {
+            let offline_obs = offline_map.get(*identity).copied();
+            let online_obs = online_map.get(*identity).copied();
+            let controlled = offline_obs
+                .or(online_obs)
+                .map(externally_controlled)
+                .unwrap_or(false);
+            let offline_unavailable = offline_obs.map(|o| o.all_failed()).unwrap_or(true);
+            let online_available = online_obs.map(|o| !o.all_failed()).unwrap_or(false);
+            controlled && offline_unavailable && online_available
+        })
+        .cloned()
+        .collect();
+    if controlled_group.len() > 1 && !offline_passed && online_passed {
+        manifest.completeness.limitations.push(format!(
+            "network counterfactual for {kind_name} is group-level: {} dependencies \
+             changed availability together ({}); per-dependency causality needs \
+             individual variation",
+            controlled_group.len(),
+            controlled_group.join(", ")
+        ));
+    }
+
+    for identity in &identities {
+        let pair = NetworkCounterfactual {
+            offline: offline_map.get(identity).copied(),
+            online: online_map.get(identity).copied(),
+        };
+        let verdict = classify_network_counterfactual(
+            &pair,
+            offline_passed,
+            online_passed,
+            controlled_group.len(),
+        );
+        let evidence_id = ctx.record(
+            "experiment-outcome",
+            "ovid-experiment",
+            TrustTier::T0,
+            serde_json::json!({
+                "condition": "network-isolated",
+                "workload": kind_name,
+                "dependency": identity,
+                "offline_passed": offline_passed,
+                "online_passed": online_passed,
+                "classification": verdict.classification,
+                "group_level": verdict.group_level,
+                "isolation": if isolation { "user-netns" } else { "proxy-env-strip" },
+            }),
+            Some(offline.run_id.clone()),
+        )?;
+        match verdict.classification {
+            CausalClassification::Required => {
+                ctx.claim(
+                    "requires",
+                    format!("workload:{kind_name}"),
+                    format!("service:{identity}"),
+                    ClaimStates::default()
+                        .with(ClaimState::Attempted)
+                        .with(ClaimState::CausallyRequired),
+                    vec![evidence_id.clone()],
+                );
+            }
+            CausalClassification::Optional => {
+                ctx.claim(
+                    "optionally-uses",
+                    format!("workload:{kind_name}"),
+                    format!("service:{identity}"),
+                    ClaimStates::default().with(ClaimState::Attempted),
+                    vec![evidence_id.clone()],
+                );
+            }
+            _ => {}
+        }
+        for system in &mut manifest.external_systems {
+            let system_identity = format!(
+                "{}:{}",
+                system.dns_name.as_deref().unwrap_or(&system.address),
+                system.port
+            );
+            if &system_identity == identity {
+                system.causality = Some(verdict.classification);
+                system.evidence.push(evidence_id.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn explain(claim_query: &str, from: &Path) -> Result<()> {

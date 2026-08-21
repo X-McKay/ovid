@@ -22,7 +22,7 @@ pub mod firecracker;
 pub mod process;
 
 pub use firecracker::{FirecrackerBackend, VmSpec};
-pub use process::{network_isolation_available, ProcessBackend};
+pub use process::{materialize_workspace, network_isolation_available, ProcessBackend};
 
 use ovid_core::OvidError;
 use ovid_observer::ObservationReport;

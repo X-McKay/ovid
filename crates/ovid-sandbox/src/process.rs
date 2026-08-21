@@ -76,6 +76,14 @@ fn isolate_network(argv: &[String]) -> Vec<String> {
     wrapped
 }
 
+/// Copy a source tree into `dest` (skipping VCS and build-output dirs) so
+/// callers can maintain one persistent provisioned workspace across runs
+/// (the dependency-installed layer of spec §16.5's snapshot hierarchy,
+/// process-backend edition).
+pub fn materialize_workspace(source_root: &Path, dest: &Path) -> Result<(), OvidError> {
+    copy_tree(source_root, dest)
+}
+
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), OvidError> {

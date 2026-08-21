@@ -221,6 +221,11 @@ pub struct CompletenessSection {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub limitations: Vec<String>,
+    /// Candidate workloads that were discovered but not executed
+    /// (spec §25.2 completeness: absence of results for these is
+    /// unexamined, not proven-absent). Format: "kind: command (source)".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workloads_not_executed: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]

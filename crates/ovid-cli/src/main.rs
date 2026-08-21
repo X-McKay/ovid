@@ -101,17 +101,27 @@ enum Command {
         locator: String,
         #[arg(long = "ref")]
         reference: Option<String>,
-        /// Workload kinds to attempt, in order.
-        #[arg(long, default_value = "test")]
+        /// Workload kinds to attempt, in order. Provisioning (the best
+        /// discovered install candidate) always runs first, online.
+        #[arg(long, default_value = "build,test")]
         workloads: String,
         #[arg(long, default_value = "ovid-output")]
         out: PathBuf,
+        /// Run in the checkout instead of a persistent workspace copy.
         #[arg(long)]
         in_place: bool,
-        /// Host environment variables to pass through to the online run
-        /// (the offline run is network-isolated).
+        /// Extra host environment variables to pass through, on top of the
+        /// defaults (PATH/HOME for all runs; proxy and CA variables for
+        /// online runs). Repeatable.
         #[arg(long = "inherit-env")]
         inherit_env: Vec<String>,
+        /// Fully scrub the environment: no default PATH/HOME/proxy
+        /// inheritance.
+        #[arg(long)]
+        no_default_env: bool,
+        /// Run up to this many discovered candidates per workload kind.
+        #[arg(long, default_value_t = 1)]
+        max_candidates: usize,
         /// Per-run wall-clock timeout in seconds.
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
@@ -267,16 +277,19 @@ fn main() -> Result<()> {
             out,
             in_place,
             inherit_env,
+            no_default_env,
+            max_candidates,
             timeout,
             packs_dir,
             json,
         } => {
             let kinds: Vec<String> = workloads.split(',').map(|s| s.trim().to_string()).collect();
-            let options = pipeline::ExecutionOptions {
+            let options = pipeline::TomographyOptions {
                 in_place,
-                inherit_env,
+                extra_inherit_env: inherit_env,
                 timeout_seconds: timeout,
-                counterfactual_env: vec![],
+                max_candidates,
+                no_default_env,
             };
             let bundle = pipeline::run_tomography(
                 &locator,
