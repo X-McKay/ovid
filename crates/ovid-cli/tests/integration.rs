@@ -116,7 +116,7 @@ fn evidence_chain_verifies_after_analysis() {
     ]);
     assert!(ok, "observe failed: {stderr}");
     let ledger = ovid_evidence::EvidenceLedger::open(out.join("evidence.jsonl")).unwrap();
-    assert!(ledger.len() > 0);
+    assert!(!ledger.is_empty());
     let head = ledger.verify_chain().expect("chain verifies").expect("chain head");
     let manifest = load_manifest(&out);
     assert_eq!(

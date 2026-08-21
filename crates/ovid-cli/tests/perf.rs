@@ -63,24 +63,25 @@ fn observed_run_overhead_is_bounded() {
     let workload = "i=0; while [ $i -lt 400 ]; do cat Cargo.toml > /dev/null; i=$((i+1)); done";
     let run = |observe: bool| -> Duration {
         let start = Instant::now();
-        let mut args = vec![
-            "observe".to_string(),
-            repo.to_str().unwrap().to_string(),
-            "--run".to_string(),
-            workload.to_string(),
-            "--in-place".to_string(),
-            "--out".to_string(),
-            format!("{}-{observe}", out_base.display()),
-        ];
         if !observe {
-            // No un-observe flag exists; approximate the native baseline by
-            // timing the same loop under plain sh.
-            args = vec![];
-            let status = Command::new("sh").arg("-c").arg(workload).current_dir(&repo).status().unwrap();
+            // Native baseline: the same loop under plain sh.
+            let status =
+                Command::new("sh").arg("-c").arg(workload).current_dir(&repo).status().unwrap();
             assert!(status.success());
             return start.elapsed();
         }
-        let output = Command::new(env!("CARGO_BIN_EXE_ovid")).args(&args).output().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ovid"))
+            .args([
+                "observe",
+                repo.to_str().unwrap(),
+                "--run",
+                workload,
+                "--in-place",
+                "--out",
+                &format!("{}-observed", out_base.display()),
+            ])
+            .output()
+            .unwrap();
         assert!(output.status.success());
         start.elapsed()
     };
