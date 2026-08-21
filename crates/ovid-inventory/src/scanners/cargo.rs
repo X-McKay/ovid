@@ -67,14 +67,23 @@ fn scan_manifest(text: &str, source: &str, report: &mut InventoryReport) {
         ("build-dependencies", Scope::Build),
     ];
     for (section, scope) in sections {
-        // Plain and workspace-level sections.
-        for table in [
-            value.get(section),
-            value.get("workspace").and_then(|w| w.get(section)),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        // Plain, workspace-level, and target-specific
+        // (`[target.'cfg(…)'.dependencies]`) tables.
+        let mut tables: Vec<&toml::Value> = Vec::new();
+        if let Some(table) = value.get(section) {
+            tables.push(table);
+        }
+        if let Some(table) = value.get("workspace").and_then(|w| w.get(section)) {
+            tables.push(table);
+        }
+        if let Some(targets) = value.get("target").and_then(|t| t.as_table()) {
+            for target in targets.values() {
+                if let Some(table) = target.get(section) {
+                    tables.push(table);
+                }
+            }
+        }
+        for table in tables {
             if let Some(deps) = table.as_table() {
                 for (name, spec) in deps {
                     report
@@ -179,5 +188,38 @@ version = "1.0.11"
             .find(|c| c.name == "tempfile")
             .unwrap();
         assert_eq!(tf.scope, crate::Scope::Dev);
+    }
+
+    #[test]
+    fn target_specific_dependencies_are_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "app"
+version = "0.1.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = "0.29"
+"#,
+        )
+        .unwrap();
+        let snapshot = acquire(
+            &RepositorySource::parse(dir.path().to_str().unwrap(), None),
+            &AcquireOptions::new(dir.path().join(".work")),
+        )
+        .unwrap();
+        let report = scan(&snapshot);
+        let winapi = report
+            .components
+            .iter()
+            .find(|c| c.name == "winapi-util")
+            .expect("target-specific dep declared");
+        assert_eq!(winapi.scope, crate::Scope::Runtime);
+        let nix = report.components.iter().find(|c| c.name == "nix").unwrap();
+        assert_eq!(nix.scope, crate::Scope::Dev);
     }
 }

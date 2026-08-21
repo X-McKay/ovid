@@ -25,13 +25,15 @@ impl Scanner for PythonScanner {
             .keys()
             .filter(|p| {
                 let base = p.rsplit('/').next().unwrap_or(p);
-                base.starts_with("requirements") && base.ends_with(".txt")
+                (base.starts_with("requirements") && base.ends_with(".txt"))
+                    || (p.contains("requirements/") && base.ends_with(".txt"))
             })
             .cloned()
             .collect();
         for path in requirement_files {
+            let scope = requirements_scope(&path);
             if let Some(text) = read_or_warn(snapshot, &path, report) {
-                scan_requirements(&text, &path, report);
+                scan_requirements(&text, &path, scope, report);
             }
         }
         for lock in ["poetry.lock", "uv.lock"] {
@@ -84,12 +86,28 @@ fn parse_requirement(line: &str) -> Option<(String, Option<String>)> {
     Some((name.to_string(), version))
 }
 
-fn scan_requirements(text: &str, source: &str, report: &mut InventoryReport) {
+/// Infer scope from a requirements file's name: `requirements-dev.txt`,
+/// `requirements/tests.txt`, docs/lint/typing variants are development
+/// declarations, not runtime dependencies.
+fn requirements_scope(path: &str) -> Scope {
+    let lowered = path.to_lowercase();
+    let dev_markers = [
+        "dev", "test", "docs", "doc", "lint", "typing", "style", "ci", "build",
+    ];
+    let base = lowered.rsplit('/').next().unwrap_or(&lowered);
+    if dev_markers.iter().any(|marker| base.contains(marker)) {
+        Scope::Dev
+    } else {
+        Scope::Runtime
+    }
+}
+
+fn scan_requirements(text: &str, source: &str, scope: Scope, report: &mut InventoryReport) {
     for line in text.lines() {
         if let Some((name, version)) = parse_requirement(line) {
             report
                 .components
-                .push(declared(&name, version.as_deref(), Scope::Runtime, source));
+                .push(declared(&name, version.as_deref(), scope, source));
         }
     }
 }
@@ -202,6 +220,17 @@ mod tests {
         );
         assert_eq!(parse_requirement("# comment"), None);
         assert_eq!(parse_requirement("-r other.txt"), None);
+    }
+
+    #[test]
+    fn requirements_scope_inference() {
+        use super::requirements_scope;
+        use crate::Scope;
+        assert_eq!(requirements_scope("requirements.txt"), Scope::Runtime);
+        assert_eq!(requirements_scope("requirements/base.txt"), Scope::Runtime);
+        assert_eq!(requirements_scope("requirements-dev.txt"), Scope::Dev);
+        assert_eq!(requirements_scope("requirements/tests.txt"), Scope::Dev);
+        assert_eq!(requirements_scope("docs/requirements-docs.txt"), Scope::Dev);
     }
 
     #[test]

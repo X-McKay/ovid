@@ -121,11 +121,12 @@ fn merge_components(report: &mut InventoryReport) {
         .map(|(e, n, _)| (e.clone(), n.clone()))
         .collect();
     let mut out: Vec<Component> = Vec::with_capacity(merged.len());
-    let mut declared_versionless: std::collections::BTreeSet<(String, String)> = Default::default();
+    let mut declared_versionless: std::collections::BTreeMap<(String, String), Scope> =
+        Default::default();
     for ((eco, name, version), component) in &merged {
         if version.is_none() && names_with_versions.contains(&(eco.clone(), name.clone())) {
             if component.states.declared {
-                declared_versionless.insert((eco.clone(), name.clone()));
+                declared_versionless.insert((eco.clone(), name.clone()), component.scope);
             }
             continue;
         }
@@ -133,9 +134,14 @@ fn merge_components(report: &mut InventoryReport) {
     }
     for component in &mut out {
         let key = (component.ecosystem.clone(), component.name.clone());
-        if declared_versionless.contains(&key) {
+        if let Some(scope) = declared_versionless.get(&key) {
             component.states.declared = true;
             component.direct = true;
+            // The manifest declaration knows the scope; a lockfile pin
+            // usually does not.
+            if component.scope == Scope::Unknown {
+                component.scope = *scope;
+            }
         }
     }
     report.components = out;

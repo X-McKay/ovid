@@ -5,7 +5,7 @@
       "ecosystem": "npm",
       "name": "@types/node",
       "purl": "pkg:npm/%40types/node@20.12.7",
-      "scope": "unknown",
+      "scope": "dev",
       "source_file": "package-lock.json",
       "states": {
         "declared": true,
@@ -30,7 +30,7 @@
       "ecosystem": "npm",
       "name": "express",
       "purl": "pkg:npm/express@4.19.2",
-      "scope": "unknown",
+      "scope": "runtime",
       "source_file": "package-lock.json",
       "states": {
         "declared": true,

@@ -52,11 +52,23 @@ def rust_ground_truth(clone: Path):
 
 
 def compare_rust(components, clone: Path):
+    """Root Cargo.lock resolutions vs the cargo-metadata resolve graph.
+
+    Workspace members are excluded from both sides. A residual precision
+    gap can remain legitimately: a lockfile retains pins for packages
+    outside the current resolve graph (e.g. excluded fuzz targets), which
+    Ovid correctly reports as `resolved` pins.
+    """
     gold = rust_ground_truth(clone)
+    member_names = {name for (name, _v) in _rust_members(clone)}
     ours = {
         (c["name"], c["version"])
         for c in components
-        if c["ecosystem"] == "cargo" and c.get("version") and c["states"].get("resolved")
+        if c["ecosystem"] == "cargo"
+        and c.get("version")
+        and c["states"].get("resolved")
+        and c["source_file"] == "Cargo.lock"
+        and c["name"] not in member_names
     }
     if not gold:
         return "n/a (no external deps)"
@@ -64,6 +76,19 @@ def compare_rust(components, clone: Path):
     precision = tp / len(ours) if ours else 0.0
     recall = tp / len(gold)
     return f"P={precision:.3f} R={recall:.3f} (n={len(gold)})"
+
+
+def _rust_members(clone: Path):
+    out = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    out.check_returncode()
+    meta = json.loads(out.stdout)
+    return {(p["name"], p["version"]) for p in meta["packages"]}
 
 
 def compare_rust_declared(components, clone: Path):
@@ -101,7 +126,10 @@ def compare_python(components, clone: Path):
     ours = {
         c["name"]
         for c in components
-        if c["ecosystem"] == "pypi" and c["states"].get("declared") and c["scope"] == "runtime"
+        if c["ecosystem"] == "pypi"
+        and c["states"].get("declared")
+        and c["scope"] == "runtime"
+        and c["source_file"] in ("pyproject.toml", "uv.lock", "requirements.txt")
     }
     tp = len(ours & gold)
     precision = tp / len(ours) if ours else 0.0
@@ -112,7 +140,13 @@ def compare_python(components, clone: Path):
 def compare_node(components, clone: Path):
     pkg = json.loads((clone / "package.json").read_text())
     gold = set(pkg.get("dependencies", {})) | set(pkg.get("devDependencies", {}))
-    ours = {c["name"] for c in components if c["ecosystem"] == "npm" and c["states"].get("declared")}
+    ours = {
+        c["name"]
+        for c in components
+        if c["ecosystem"] == "npm"
+        and c["states"].get("declared")
+        and c["source_file"] in ("package.json", "package-lock.json")
+    }
     tp = len(ours & gold)
     precision = tp / len(ours) if ours else 0.0
     recall = tp / len(gold) if gold else 0.0

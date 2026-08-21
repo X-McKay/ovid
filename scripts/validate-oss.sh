@@ -17,7 +17,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OVID="${OVID_BIN:-$ROOT/target/release/ovid}"
-WORK="$ROOT/validation-workdir"
+# The workdir must live OUTSIDE the Ovid cargo workspace: ground-truth
+# `cargo metadata` runs inside the clones and must not walk up into
+# Ovid's own workspace manifest.
+WORK="${OVID_VALIDATION_WORKDIR:-${TMPDIR:-/tmp}/ovid-validation-workdir}"
 RESULTS="$WORK/results.md"
 
 # Environment variables observed workloads may need for toolchains and
@@ -139,7 +142,7 @@ PY
 # failure evidence is the point).
 observe_case "flask" "https://github.com/pallets/flask" "main" "python3 -c 'import flask' || true" 120
 # Rust: metadata + lockfile verification exercises heavy file boundaries.
-observe_case "fd" "https://github.com/sharkdp/fd" "master" "cargo metadata --format-version 1 --offline > /dev/null" 300
+observe_case "fd" "https://github.com/sharkdp/fd" "master" "cargo metadata --format-version 1 --no-deps > /dev/null" 300
 # Rust: full debug build of a small crate under observation (network via proxy).
 observe_case "fd-build" "https://github.com/sharkdp/fd" "master" "cargo build -q" 1800
 
