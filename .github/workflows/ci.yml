@@ -32,6 +32,20 @@ jobs:
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  cross-check:
+    name: Cross-platform compilation (macOS, Windows targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Windows target (static analysis must compile everywhere)
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+      - name: Check macOS target
+        run: cargo check --workspace --all-targets --target aarch64-apple-darwin
+
   test:
     name: Unit, integration, and golden tests
     runs-on: ubuntu-latest

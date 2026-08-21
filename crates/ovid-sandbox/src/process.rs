@@ -39,7 +39,7 @@ impl ProcessBackend {
             .prefix("world-")
             .tempdir_in(self.keep_dir.path())?
             .keep();
-        copy_root(source_root, &workspace)?;
+        crate::materialize_workspace(source_root, &workspace)?;
         Ok(workspace)
     }
 }
@@ -76,57 +76,6 @@ fn isolate_network(argv: &[String]) -> Vec<String> {
     ];
     wrapped.extend(argv.iter().cloned());
     wrapped
-}
-
-/// Copy a source tree into `dest` (skipping build-output dirs, keeping the
-/// root `.git`) so callers can maintain one persistent provisioned
-/// workspace across runs (the dependency-installed layer of spec §16.5's
-/// snapshot hierarchy, process-backend edition).
-pub fn materialize_workspace(source_root: &Path, dest: &Path) -> Result<(), OvidError> {
-    copy_root(source_root, dest)
-}
-
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
-
-/// Copy a repository root: the normal tree plus the top-level `.git`.
-/// Nested `.git` directories (vendored repos) stay skipped, as do build
-/// outputs. Without git metadata, workloads that derive versions from VCS
-/// (setuptools-scm, hatch-vcs, `git describe`) or run repo-hygiene tests
-/// (`git ls-files`) fail for reasons the real checkout would not — an
-/// observation artifact Ovid must not introduce (§6.2: failures are
-/// evidence, so they had better be the repository's own).
-fn copy_root(from: &Path, to: &Path) -> Result<(), OvidError> {
-    copy_tree(from, to)?;
-    let git_dir = from.join(".git");
-    if git_dir.is_dir() {
-        copy_tree(&git_dir, &to.join(".git"))?;
-    }
-    Ok(())
-}
-
-fn copy_tree(from: &Path, to: &Path) -> Result<(), OvidError> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let target = to.join(&name);
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            if SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            copy_tree(&entry.path(), &target)?;
-        } else if file_type.is_file() {
-            std::fs::copy(entry.path(), &target)?;
-        } else if file_type.is_symlink() {
-            // Preserve intra-tree symlinks; refuse to follow outside links.
-            if let Ok(dest) = std::fs::read_link(entry.path()) {
-                let _ = std::os::unix::fs::symlink(dest, &target);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The scrubbed base environment: no host secrets, no proxy credentials, no
@@ -415,34 +364,6 @@ mod tests {
         );
         assert!(result.workspace_path.join("created.txt").exists());
         assert!(!source.path().join("created.txt").exists());
-    }
-
-    #[test]
-    fn workspace_copy_keeps_root_git_and_skips_caches_and_nested_git() {
-        let source = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(source.path().join(".git/objects")).unwrap();
-        std::fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main").unwrap();
-        std::fs::create_dir_all(source.path().join("vendor/dep/.git")).unwrap();
-        std::fs::write(source.path().join("vendor/dep/.git/HEAD"), "nested").unwrap();
-        std::fs::create_dir_all(source.path().join("node_modules/x")).unwrap();
-        std::fs::write(source.path().join("main.rs"), "fn main() {}").unwrap();
-
-        let dest = tempfile::tempdir().unwrap();
-        materialize_workspace(source.path(), dest.path()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dest.path().join(".git/HEAD")).unwrap(),
-            "ref: refs/heads/main",
-            "root .git must survive so VCS-derived workloads behave"
-        );
-        assert!(dest.path().join("main.rs").exists());
-        assert!(
-            !dest.path().join("vendor/dep/.git").exists(),
-            "nested vendored .git stays skipped"
-        );
-        assert!(
-            !dest.path().join("node_modules").exists(),
-            "caches stay skipped"
-        );
     }
 
     #[test]

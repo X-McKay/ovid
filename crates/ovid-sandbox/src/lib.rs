@@ -18,17 +18,28 @@
 //! The experiment loop chooses a backend by policy; evidence records carry
 //! which backend produced them so trust tiers stay honest.
 
+#[cfg(unix)]
 pub mod firecracker;
+#[cfg(unix)]
 pub mod process;
+/// Non-unix hosts get honest stubs: static analysis works everywhere;
+/// execution backends fail at construction with `UnsupportedHost` rather
+/// than degrading silently (invariant: isolation honesty).
+#[cfg(not(unix))]
+mod unsupported;
 
+#[cfg(unix)]
 pub use firecracker::{FirecrackerBackend, VmSpec};
-pub use process::{materialize_workspace, network_isolation_available, ProcessBackend};
+#[cfg(unix)]
+pub use process::{network_isolation_available, ProcessBackend};
+#[cfg(not(unix))]
+pub use unsupported::{network_isolation_available, FirecrackerBackend, ProcessBackend, VmSpec};
 
 use ovid_core::OvidError;
 use ovid_observer::ObservationReport;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How strong the isolation of a backend is. Recorded into provenance so a
@@ -154,4 +165,89 @@ pub trait ExecutionBackend {
     fn name(&self) -> &'static str;
     fn isolation_tier(&self) -> IsolationTier;
     fn run(&self, spec: &RunSpec) -> Result<RunResult, OvidError>;
+}
+
+const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
+
+/// Copy a source tree into `dest` (skipping build-output dirs, keeping the
+/// root `.git`) so callers can maintain one persistent provisioned
+/// workspace across runs (the dependency-installed layer of spec §16.5's
+/// snapshot hierarchy). Portable: usable on every host, since static
+/// analysis and future guest-VM backends need workspaces even where the
+/// process backend is unsupported.
+pub fn materialize_workspace(source_root: &Path, dest: &Path) -> Result<(), OvidError> {
+    copy_tree(source_root, dest)?;
+    // The top-level `.git` is preserved: without git metadata, workloads
+    // that derive versions from VCS (setuptools-scm, hatch-vcs,
+    // `git describe`) or run repo-hygiene tests (`git ls-files`) fail for
+    // reasons the real checkout would not (§6.2: failures are evidence, so
+    // they had better be the repository's own). Nested vendored `.git`
+    // directories stay skipped.
+    let git_dir = source_root.join(".git");
+    if git_dir.is_dir() {
+        copy_tree(&git_dir, &dest.join(".git"))?;
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), OvidError> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let target = to.join(&name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if SKIP_DIRS.contains(&name_str.as_ref()) {
+                continue;
+            }
+            copy_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        } else if file_type.is_symlink() {
+            // Preserve intra-tree symlinks; refuse to follow outside
+            // links. On hosts without unix symlink semantics the entry is
+            // skipped — a bounded fidelity loss on an already-degraded
+            // platform, never an escape from the tree.
+            #[cfg(unix)]
+            if let Ok(dest) = std::fs::read_link(entry.path()) {
+                let _ = std::os::unix::fs::symlink(dest, &target);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_copy_keeps_root_git_and_skips_caches_and_nested_git() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join(".git/objects")).unwrap();
+        std::fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        std::fs::create_dir_all(source.path().join("vendor/dep/.git")).unwrap();
+        std::fs::write(source.path().join("vendor/dep/.git/HEAD"), "nested").unwrap();
+        std::fs::create_dir_all(source.path().join("node_modules/x")).unwrap();
+        std::fs::write(source.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        materialize_workspace(source.path(), dest.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(".git/HEAD")).unwrap(),
+            "ref: refs/heads/main",
+            "root .git must survive so VCS-derived workloads behave"
+        );
+        assert!(dest.path().join("main.rs").exists());
+        assert!(
+            !dest.path().join("vendor/dep/.git").exists(),
+            "nested vendored .git stays skipped"
+        );
+        assert!(
+            !dest.path().join("node_modules").exists(),
+            "caches stay skipped"
+        );
+    }
 }

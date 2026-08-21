@@ -11,7 +11,9 @@ ovid-core.workspace = true
 ovid-observer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-libc.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
