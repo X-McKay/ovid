@@ -121,6 +121,64 @@ pub fn propose_resolutions(
         }
     }
 
+    // PATH-scan misses: shells and make locate commands with stat/access
+    // probes, so a missing tool shows up as the same basename missing from
+    // two or more directories with no successful exec of that basename.
+    // Only resolver-known executables become proposals here — arbitrary
+    // stat misses (module probing, optional plugins) carry too little
+    // signal on their own (§6.6: prefer precision over forced resolution).
+    let mut scan_dirs: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    for envelope in events {
+        if let BoundaryEvent::FileOpened { path, errno: Some(errno), .. } = &envelope.event {
+            if errno == "ENOENT" {
+                if let Some((dir, base)) = path.rsplit_once('/') {
+                    if !base.is_empty() && !base.contains('.') {
+                        scan_dirs.entry(base.to_string()).or_default().insert(dir.to_string());
+                    }
+                }
+            }
+        }
+    }
+    for (basename, dirs) in &scan_dirs {
+        if dirs.len() < 2 || seen_tools.contains(basename) {
+            continue;
+        }
+        let succeeded = events.iter().any(|other| {
+            matches!(
+                &other.event,
+                BoundaryEvent::ProcessExec { path: p, errno: None, .. }
+                    if p.rsplit('/').next() == Some(basename.as_str())
+            )
+        });
+        if succeeded {
+            continue;
+        }
+        if let Some(candidate) = registry.resolve_executable(basename).first() {
+            let evidence: Vec<OvidId> = events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        &e.event,
+                        BoundaryEvent::FileOpened { path, errno: Some(_), .. }
+                            if path.rsplit('/').next() == Some(basename.as_str())
+                    )
+                })
+                .map(|e| e.event_id.clone())
+                .collect();
+            seen_tools.insert(basename.clone());
+            proposals.push(ResolutionProposal {
+                kind: ResolutionKind::InstallTool {
+                    executable: basename.clone(),
+                    package: candidate.package.clone(),
+                    provider: candidate.provider.clone(),
+                },
+                confidence: candidate.confidence * 0.9, // stat scans are one step weaker than exec misses
+                evidence,
+            });
+        }
+    }
+
     // Failed external destinations: service pack, stub, or unresolved
     // (§18.1's resolution order, steps 3/5/7 — fleet providers are steps
     // 2/6 and out of scope for local mode).
@@ -235,6 +293,94 @@ mod tests {
         let network = analyze_network(&events, &registry, &BTreeMap::new());
         let proposals = propose_resolutions(&events, &network, &registry);
         assert!(proposals.is_empty(), "resolved PATH scans must not propose installs: {proposals:?}");
+    }
+
+    #[test]
+    fn path_scan_stat_misses_propose_known_tool() {
+        let ids = IdGenerator::deterministic();
+        let registry = PackRegistry::builtin().unwrap();
+        let miss = |dir: &str| {
+            BoundaryEvent::FileOpened {
+                path: format!("{dir}/protoc"),
+                errno: Some("ENOENT".into()),
+                write: false,
+            }
+        };
+        let events = vec![
+            envelope(&ids, miss("/usr/local/bin")),
+            envelope(&ids, miss("/usr/bin")),
+            envelope(&ids, miss("/bin")),
+        ];
+        let network = analyze_network(&events, &registry, &BTreeMap::new());
+        let proposals = propose_resolutions(&events, &network, &registry);
+        assert!(matches!(
+            &proposals[0].kind,
+            ResolutionKind::InstallTool { executable, package, .. }
+                if executable == "protoc" && package == "protobuf-compiler"
+        ));
+        assert_eq!(proposals[0].evidence.len(), 3);
+    }
+
+    #[test]
+    fn path_scan_with_successful_exec_is_not_missing() {
+        let ids = IdGenerator::deterministic();
+        let registry = PackRegistry::builtin().unwrap();
+        let events = vec![
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/usr/local/bin/make".into(),
+                    errno: Some("ENOENT".into()),
+                    write: false,
+                },
+            ),
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/opt/bin/make".into(),
+                    errno: Some("ENOENT".into()),
+                    write: false,
+                },
+            ),
+            envelope(
+                &ids,
+                BoundaryEvent::ProcessExec {
+                    path: "/usr/bin/make".into(),
+                    argv: vec!["make".into()],
+                    errno: None,
+                },
+            ),
+        ];
+        let network = analyze_network(&events, &registry, &BTreeMap::new());
+        let proposals = propose_resolutions(&events, &network, &registry);
+        assert!(proposals.is_empty(), "found tool must not be proposed: {proposals:?}");
+    }
+
+    #[test]
+    fn unknown_stat_misses_are_not_proposed() {
+        let ids = IdGenerator::deterministic();
+        let registry = PackRegistry::builtin().unwrap();
+        let events = vec![
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/usr/lib/python3/dist-packages/optional_module".into(),
+                    errno: Some("ENOENT".into()),
+                    write: false,
+                },
+            ),
+            envelope(
+                &ids,
+                BoundaryEvent::FileOpened {
+                    path: "/usr/local/lib/python3/optional_module".into(),
+                    errno: Some("ENOENT".into()),
+                    write: false,
+                },
+            ),
+        ];
+        let network = analyze_network(&events, &registry, &BTreeMap::new());
+        let proposals = propose_resolutions(&events, &network, &registry);
+        assert!(proposals.is_empty(), "unknown probes must not spam proposals: {proposals:?}");
     }
 
     #[test]

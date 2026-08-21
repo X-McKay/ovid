@@ -29,9 +29,11 @@ pub fn strace_available() -> bool {
 pub struct StraceObserver;
 
 /// Syscalls traced. Kept minimal for overhead (§12.2): process, file, and
-/// socket boundaries only.
-const TRACE_SET: &str =
-    "execve,execveat,openat,open,creat,connect,bind,listen,socket,exit_group";
+/// socket boundaries only. stat/access are included because every modern
+/// shell and make performs PATH lookups with stat-family probes rather
+/// than execve loops — a missing tool is visible *only* as a stat miss.
+const TRACE_SET: &str = "execve,execveat,openat,open,creat,newfstatat,statx,access,faccessat,\
+                         faccessat2,connect,bind,listen,socket,exit_group";
 
 impl BoundaryObserver for StraceObserver {
     fn name(&self) -> &'static str {
@@ -121,6 +123,7 @@ fn regexes() -> &'static Regexes {
     RE.get_or_init(|| Regexes {
         execve: re(r#"^execve(?:at)?\((?:[^,]*,\s*)?"([^"]+)",\s*\[(.*?)\][^=]*=\s*(-?\d+)(?:\s+(\w+))?"#),
         open: re(r#"^(?:openat|open|creat)\((?:AT_FDCWD,\s*|[-\d]+(?:<[^>]*>)?,\s*)?"([^"]+)"(?:,\s*([A-Z_|]+))?[^=]*=\s*(-?\d+)(?:\s+(\w+))?"#),
+        stat_miss: re(r#"^(?:newfstatat|statx|access|faccessat2?|faccessat)\((?:AT_FDCWD,\s*|[-\d]+(?:<[^>]*>)?,\s*)?"([^"]+)"[^=]*=\s*-\d+\s+(\w+)"#),
         inet: re(r#"sin6?_port=htons\((\d+)\)"#),
         inet_addr: re(r#"inet_addr\("([^"]+)"\)|inet_pton\([^,]+,\s*"([^"]+)""#),
         unix_path: re(r#"sun_path="([^"]+)""#),
@@ -134,6 +137,7 @@ fn regexes() -> &'static Regexes {
 struct Regexes {
     execve: Regex,
     open: Regex,
+    stat_miss: Regex,
     inet: Regex,
     inet_addr: Regex,
     unix_path: Regex,
@@ -210,6 +214,27 @@ impl Parser {
                 return LineOutcome::Event(pid, BoundaryEvent::SharedObjectMapped { path });
             }
             return LineOutcome::Event(pid, BoundaryEvent::FileOpened { path, errno, write });
+        }
+
+        // stat/access failures: PATH-scan misses and probed-but-absent
+        // files. Successful stats are deliberately not events (volume);
+        // failures are first-class (§6.2).
+        if let Some(caps) = r.stat_miss.captures(rest) {
+            return LineOutcome::Event(
+                pid,
+                BoundaryEvent::FileOpened {
+                    path: caps[1].to_string(),
+                    errno: Some(caps[2].to_string()),
+                    write: false,
+                },
+            );
+        }
+        if rest.starts_with("newfstatat(")
+            || rest.starts_with("statx(")
+            || rest.starts_with("access(")
+            || rest.starts_with("faccessat")
+        {
+            return LineOutcome::Ignored; // successful stat/access
         }
 
         if rest.starts_with("connect(") {
@@ -441,6 +466,25 @@ mod tests {
             .expect("stitched connect event");
         assert_eq!(connect.0, 80);
         assert_eq!(connect.1.as_deref(), Some("ETIMEDOUT"));
+    }
+
+    #[test]
+    fn stat_scan_misses_become_file_events() {
+        let report = collect_from(concat!(
+            "700   newfstatat(AT_FDCWD, \"/usr/local/bin/protoc\", 0x7ffec9c35ec0, 0) = -1 ENOENT (No such file or directory)\n",
+            "700   access(\"/usr/bin/protoc\", X_OK) = -1 ENOENT (No such file or directory)\n",
+            "700   statx(AT_FDCWD, \"/opt/bin/protoc\", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x7ffd) = -1 ENOENT (No such file or directory)\n",
+            "700   newfstatat(AT_FDCWD, \"/usr/bin/make\", {st_mode=S_IFREG|0755, st_size=1}, 0) = 0\n",
+        ));
+        // Three misses captured; the successful stat is ignored.
+        assert_eq!(report.events.len(), 3);
+        for envelope in &report.events {
+            assert!(matches!(
+                &envelope.event,
+                BoundaryEvent::FileOpened { errno: Some(err), .. } if err == "ENOENT"
+            ));
+        }
+        assert_eq!(report.unparsed_lines, 0);
     }
 
     #[test]

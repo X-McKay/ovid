@@ -1,0 +1,12 @@
+# Fixture-scoped tool resolver: maps the intentionally-absent fixture tool
+# to a fake trusted package, exercising the InstallTool proposal path and
+# external pack loading without depending on host tool availability.
+api_version: ovid.dev/pack/v1
+kind: tool-resolver-pack
+metadata:
+  name: fixture-resolver
+  version: 1.0.0
+  signer: fixture
+executables:
+  ovid-fixture-protoc:
+    - { provider: fixture-provider, package: fixture-protoc-package, confidence: 0.97 }

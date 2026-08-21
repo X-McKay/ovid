@@ -36,6 +36,9 @@ enum Command {
         /// Output bundle directory.
         #[arg(long, default_value = "ovid-output")]
         out: PathBuf,
+        /// Additional pack directory to load (validated, schema-checked).
+        #[arg(long = "packs-dir")]
+        packs_dir: Option<PathBuf>,
         /// Print the manifest as JSON instead of a summary.
         #[arg(long)]
         json: bool,
@@ -60,6 +63,8 @@ enum Command {
         /// Wall-clock timeout in seconds.
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        #[arg(long = "packs-dir")]
+        packs_dir: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -84,6 +89,8 @@ enum Command {
         /// required by re-running without them (repeatable).
         #[arg(long = "counterfactual-env")]
         counterfactual_env: Vec<String>,
+        #[arg(long = "packs-dir")]
+        packs_dir: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -146,8 +153,8 @@ enum PacksCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Inventory { locator, reference, out, json } => {
-            let bundle = pipeline::run_inventory(&locator, reference, &out)?;
+        Command::Inventory { locator, reference, out, packs_dir, json } => {
+            let bundle = pipeline::run_inventory(&locator, reference, &out, packs_dir.as_deref())?;
             if json {
                 println!("{}", bundle.manifest.to_json_pretty());
             } else {
@@ -155,14 +162,25 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Observe { locator, reference, run, out, in_place, inherit_env, timeout, json } => {
+        Command::Observe {
+            locator,
+            reference,
+            run,
+            out,
+            in_place,
+            inherit_env,
+            timeout,
+            packs_dir,
+            json,
+        } => {
             let options = pipeline::ExecutionOptions {
                 in_place,
                 inherit_env,
                 timeout_seconds: timeout,
                 counterfactual_env: vec![],
             };
-            let bundle = pipeline::run_observe(&locator, reference, &run, &out, &options)?;
+            let bundle =
+                pipeline::run_observe(&locator, reference, &run, &out, &options, packs_dir.as_deref())?;
             if json {
                 println!("{}", bundle.manifest.to_json_pretty());
             } else {
@@ -179,6 +197,7 @@ fn main() -> Result<()> {
             inherit_env,
             timeout,
             counterfactual_env,
+            packs_dir,
             json,
         } => {
             let kinds: Vec<String> = workloads.split(',').map(|s| s.trim().to_string()).collect();
@@ -188,7 +207,8 @@ fn main() -> Result<()> {
                 timeout_seconds: timeout,
                 counterfactual_env,
             };
-            let bundle = pipeline::run_analyze(&locator, reference, &kinds, &out, &options)?;
+            let bundle =
+                pipeline::run_analyze(&locator, reference, &kinds, &out, &options, packs_dir.as_deref())?;
             if json {
                 println!("{}", bundle.manifest.to_json_pretty());
             } else {

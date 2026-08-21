@@ -59,9 +59,14 @@ struct Context {
 }
 
 impl Context {
-    fn open(out_dir: &Path) -> Result<Context> {
+    fn open(out_dir: &Path, packs_dir: Option<&Path>) -> Result<Context> {
         std::fs::create_dir_all(out_dir)?;
-        let registry = PackRegistry::builtin().map_err(|e| anyhow!("builtin packs: {e}"))?;
+        let mut registry = PackRegistry::builtin().map_err(|e| anyhow!("builtin packs: {e}"))?;
+        if let Some(dir) = packs_dir {
+            registry
+                .load_dir(dir)
+                .map_err(|e| anyhow!("loading packs from {}: {e}", dir.display()))?;
+        }
         Ok(Context {
             out_dir: out_dir.to_path_buf(),
             ids: IdGenerator::new(),
@@ -491,8 +496,13 @@ fn finalize(ctx: &mut Context, manifest: &mut Manifest, lock: Option<&WorldLock>
 // Entry points
 // ---------------------------------------------------------------------------
 
-pub fn run_inventory(locator: &str, reference: Option<String>, out: &Path) -> Result<Bundle> {
-    let mut ctx = Context::open(out)?;
+pub fn run_inventory(
+    locator: &str,
+    reference: Option<String>,
+    out: &Path,
+    packs_dir: Option<&Path>,
+) -> Result<Bundle> {
+    let mut ctx = Context::open(out, packs_dir)?;
     let snapshot = acquire_snapshot(locator, reference, out)?;
     let report = ovid_inventory::scan(&snapshot);
     record_inventory(&mut ctx, &snapshot, &report)?;
@@ -520,8 +530,9 @@ pub fn run_observe(
     command: &str,
     out: &Path,
     options: &ExecutionOptions,
+    packs_dir: Option<&Path>,
 ) -> Result<Bundle> {
-    let mut ctx = Context::open(out)?;
+    let mut ctx = Context::open(out, packs_dir)?;
     let snapshot = acquire_snapshot(locator, reference, out)?;
     let report = ovid_inventory::scan(&snapshot);
     record_inventory(&mut ctx, &snapshot, &report)?;
@@ -561,8 +572,9 @@ pub fn run_analyze(
     workload_kinds: &[String],
     out: &Path,
     options: &ExecutionOptions,
+    packs_dir: Option<&Path>,
 ) -> Result<Bundle> {
-    let mut ctx = Context::open(out)?;
+    let mut ctx = Context::open(out, packs_dir)?;
     let snapshot = acquire_snapshot(locator, reference, out)?;
     let report = ovid_inventory::scan(&snapshot);
     record_inventory(&mut ctx, &snapshot, &report)?;

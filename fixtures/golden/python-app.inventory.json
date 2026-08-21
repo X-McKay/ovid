@@ -1,0 +1,40 @@
+{
+  "components": [
+    {
+      "direct": true,
+      "ecosystem": "pypi",
+      "name": "psycopg2-binary",
+      "purl": "pkg:pypi/psycopg2-binary@2.9.9",
+      "scope": "runtime",
+      "source_file": "pyproject.toml",
+      "states": {
+        "declared": true
+      },
+      "version": "2.9.9"
+    },
+    {
+      "direct": true,
+      "ecosystem": "pypi",
+      "name": "requests",
+      "purl": "pkg:pypi/requests@2.31.0",
+      "scope": "runtime",
+      "source_file": "requirements.txt",
+      "states": {
+        "declared": true
+      },
+      "version": "2.31.0"
+    }
+  ],
+  "file_count": 3,
+  "languages": [
+    {
+      "estimated_fraction": 1.0,
+      "file_count": 1,
+      "name": "python"
+    }
+  ],
+  "scanned_files": [
+    "pyproject.toml",
+    "requirements.txt"
+  ]
+}

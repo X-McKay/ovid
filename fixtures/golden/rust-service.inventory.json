@@ -1,0 +1,28 @@
+{
+  "components": [
+    {
+      "direct": false,
+      "ecosystem": "cargo",
+      "name": "rust-service",
+      "purl": "pkg:cargo/rust-service@0.1.0",
+      "scope": "unknown",
+      "source_file": "Cargo.lock",
+      "states": {
+        "resolved": true
+      },
+      "version": "0.1.0"
+    }
+  ],
+  "file_count": 4,
+  "languages": [
+    {
+      "estimated_fraction": 1.0,
+      "file_count": 1,
+      "name": "rust"
+    }
+  ],
+  "scanned_files": [
+    "Cargo.toml",
+    "Cargo.lock"
+  ]
+}

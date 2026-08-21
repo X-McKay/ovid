@@ -1,0 +1,54 @@
+{
+  "components": [
+    {
+      "direct": true,
+      "ecosystem": "npm",
+      "name": "@types/node",
+      "purl": "pkg:npm/%40types/node@20.12.7",
+      "scope": "unknown",
+      "source_file": "package-lock.json",
+      "states": {
+        "declared": true,
+        "resolved": true
+      },
+      "version": "20.12.7"
+    },
+    {
+      "direct": false,
+      "ecosystem": "npm",
+      "name": "accepts",
+      "purl": "pkg:npm/accepts@1.3.8",
+      "scope": "unknown",
+      "source_file": "package-lock.json",
+      "states": {
+        "resolved": true
+      },
+      "version": "1.3.8"
+    },
+    {
+      "direct": true,
+      "ecosystem": "npm",
+      "name": "express",
+      "purl": "pkg:npm/express@4.19.2",
+      "scope": "unknown",
+      "source_file": "package-lock.json",
+      "states": {
+        "declared": true,
+        "resolved": true
+      },
+      "version": "4.19.2"
+    }
+  ],
+  "file_count": 4,
+  "languages": [
+    {
+      "estimated_fraction": 1.0,
+      "file_count": 2,
+      "name": "javascript"
+    }
+  ],
+  "scanned_files": [
+    "package.json",
+    "package-lock.json"
+  ]
+}
