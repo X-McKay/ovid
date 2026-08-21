@@ -30,14 +30,16 @@ impl ProcessBackend {
     }
 
     /// Copy `source_root` into a fresh workspace (clean-rerun semantics).
-    /// `.git` and common build-output directories are skipped: the guest
-    /// gets sources, not the host's caches.
+    /// Build-output directories are skipped — the guest gets sources, not
+    /// the host's caches — but the root `.git` is preserved so workloads
+    /// that ask git questions (VCS-derived versions, hygiene tests) behave
+    /// as they would in a real checkout.
     fn materialize(&self, source_root: &Path) -> Result<PathBuf, OvidError> {
         let workspace = tempfile::Builder::new()
             .prefix("world-")
             .tempdir_in(self.keep_dir.path())?
             .keep();
-        copy_tree(source_root, &workspace)?;
+        copy_root(source_root, &workspace)?;
         Ok(workspace)
     }
 }
@@ -76,15 +78,31 @@ fn isolate_network(argv: &[String]) -> Vec<String> {
     wrapped
 }
 
-/// Copy a source tree into `dest` (skipping VCS and build-output dirs) so
-/// callers can maintain one persistent provisioned workspace across runs
-/// (the dependency-installed layer of spec §16.5's snapshot hierarchy,
-/// process-backend edition).
+/// Copy a source tree into `dest` (skipping build-output dirs, keeping the
+/// root `.git`) so callers can maintain one persistent provisioned
+/// workspace across runs (the dependency-installed layer of spec §16.5's
+/// snapshot hierarchy, process-backend edition).
 pub fn materialize_workspace(source_root: &Path, dest: &Path) -> Result<(), OvidError> {
-    copy_tree(source_root, dest)
+    copy_root(source_root, dest)
 }
 
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
+
+/// Copy a repository root: the normal tree plus the top-level `.git`.
+/// Nested `.git` directories (vendored repos) stay skipped, as do build
+/// outputs. Without git metadata, workloads that derive versions from VCS
+/// (setuptools-scm, hatch-vcs, `git describe`) or run repo-hygiene tests
+/// (`git ls-files`) fail for reasons the real checkout would not — an
+/// observation artifact Ovid must not introduce (§6.2: failures are
+/// evidence, so they had better be the repository's own).
+fn copy_root(from: &Path, to: &Path) -> Result<(), OvidError> {
+    copy_tree(from, to)?;
+    let git_dir = from.join(".git");
+    if git_dir.is_dir() {
+        copy_tree(&git_dir, &to.join(".git"))?;
+    }
+    Ok(())
+}
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), OvidError> {
     std::fs::create_dir_all(to)?;
@@ -397,6 +415,34 @@ mod tests {
         );
         assert!(result.workspace_path.join("created.txt").exists());
         assert!(!source.path().join("created.txt").exists());
+    }
+
+    #[test]
+    fn workspace_copy_keeps_root_git_and_skips_caches_and_nested_git() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join(".git/objects")).unwrap();
+        std::fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        std::fs::create_dir_all(source.path().join("vendor/dep/.git")).unwrap();
+        std::fs::write(source.path().join("vendor/dep/.git/HEAD"), "nested").unwrap();
+        std::fs::create_dir_all(source.path().join("node_modules/x")).unwrap();
+        std::fs::write(source.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        materialize_workspace(source.path(), dest.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(".git/HEAD")).unwrap(),
+            "ref: refs/heads/main",
+            "root .git must survive so VCS-derived workloads behave"
+        );
+        assert!(dest.path().join("main.rs").exists());
+        assert!(
+            !dest.path().join("vendor/dep/.git").exists(),
+            "nested vendored .git stays skipped"
+        );
+        assert!(
+            !dest.path().join("node_modules").exists(),
+            "caches stay skipped"
+        );
     }
 
     #[test]
