@@ -483,6 +483,9 @@ impl HostLaboratory {
                 key: DependencyKey::network(observation.identity()),
                 externally_controlled: observation.externally_controlled(),
                 all_failed: observation.all_failed(),
+                // Syscall-observed failures are not gateway-enforced
+                // refusals; only the gateway sets `enforced_unavailable`.
+                enforced_unavailable: false,
                 attempts: observation.attempts,
                 failures: observation.failures,
             })
@@ -1059,7 +1062,11 @@ fn is_loopback_host(host: &str) -> bool {
 /// `all_failed` is true when every intent to it was refused (the
 /// deny/block gateway contacted nothing), false when any was forwarded.
 fn merge_intent_candidates(observations: &mut TrialObservations, intents: &[GatewayIntent]) {
-    let mut by_identity: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    // Per identity: (attempts, non-forwarded failures, refused-by-policy,
+    // forwarded). An enforced refusal (`refused`) is the gateway blocking
+    // the destination itself; `forward-failed` is a genuinely unreachable
+    // host; `forwarded` means it got through.
+    let mut by_identity: BTreeMap<String, (u64, u64, u64, u64)> = BTreeMap::new();
     for intent in intents {
         if is_loopback_host(&intent.host) {
             continue;
@@ -1073,23 +1080,33 @@ fn merge_intent_candidates(observations: &mut TrialObservations, intents: &[Gate
             decision: intent.decision.clone(),
         });
         let identity = format!("{}:{}", intent.host, intent.port);
-        let entry = by_identity.entry(identity).or_insert((0, 0));
+        let entry = by_identity.entry(identity).or_insert((0, 0, 0, 0));
         entry.0 += 1; // attempts
-        if intent.decision != "forwarded" {
-            entry.1 += 1; // refused/failed
+        match intent.decision.as_str() {
+            "forwarded" => entry.3 += 1,
+            "refused" => {
+                entry.1 += 1;
+                entry.2 += 1;
+            }
+            _ => entry.1 += 1, // forward-failed and anything else: a failure, but not enforced
         }
     }
-    for (identity, (attempts, failures)) in by_identity {
+    for (identity, (attempts, failures, refused, forwarded)) in by_identity {
+        // Enforced only when every attempt was a policy refusal: nothing
+        // forwarded and nothing merely failed to connect.
+        let enforced = attempts > 0 && forwarded == 0 && refused == attempts;
         let key = DependencyKey::network(&identity);
         if let Some(existing) = observations.network.iter_mut().find(|c| c.key == key) {
             existing.attempts += attempts;
             existing.failures += failures;
             existing.all_failed = existing.failures >= existing.attempts;
+            existing.enforced_unavailable &= enforced;
         } else {
             observations.network.push(NetworkCandidate {
                 key,
                 externally_controlled: true,
                 all_failed: failures >= attempts,
+                enforced_unavailable: enforced,
                 attempts,
                 failures,
             });

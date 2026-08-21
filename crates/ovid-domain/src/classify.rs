@@ -134,6 +134,41 @@ pub fn classify_natural_counterfactual(
         .collect()
 }
 
+/// Credit an *enforced* egress denial (proposal §7.6, ADR-014; spec
+/// §13.10): under the deny posture the laboratory gateway refused this
+/// destination — the block was enforced by policy and nothing real was
+/// contacted — yet the workload still passed its baseline. That refusal
+/// is the counterfactual: the dependency is `optional` in scope, and the
+/// evidence is the enforcement itself, not a happenstance outage. This is
+/// stronger than [`classify_natural_counterfactual`] (which credits a
+/// destination that merely happened to be unreachable) and is kept
+/// distinct so the label's reason names the enforcement. Candidates that
+/// were not demonstrably refused are not returned here.
+pub fn classify_enforced_deny(
+    baseline: &BaselineVerdict,
+    baseline_trials: &[String],
+    candidates: &[CandidateEvidence],
+) -> Vec<CausalConclusion> {
+    let BaselineVerdict::StablePassing { runs } = baseline else {
+        return Vec::new();
+    };
+    let confidence = if *runs >= 2 { 0.9 } else { 0.75 };
+    candidates
+        .iter()
+        .filter(|c| c.externally_controlled && c.unavailable_under_treatment)
+        .map(|candidate| CausalConclusion {
+            dependency: candidate.key.clone(),
+            necessity: Necessity::Optional,
+            reason: format!(
+                "workload passed {runs}/{runs} baseline runs while the laboratory gateway \
+                 enforced a deny posture and refused this dependency (nothing was contacted)"
+            ),
+            trials: baseline_trials.to_vec(),
+            confidence,
+        })
+        .collect()
+}
+
 /// Classify the candidates affected by one intervention: a set of trials
 /// that all applied the same treatment, compared against the baseline
 /// verdict (proposal §10.7).
@@ -411,6 +446,34 @@ mod tests {
         assert_eq!(conclusions[0].necessity(), Necessity::Optional);
         assert!(conclusions[0].reason().contains("natural counterfactual"));
         assert_eq!(conclusions[0].trials().len(), 2);
+    }
+
+    #[test]
+    fn enforced_deny_credits_the_gateway_refusal() {
+        let conclusions = classify_enforced_deny(
+            &stable_baseline(),
+            &["baseline-1".into(), "baseline-2".into()],
+            &[
+                candidate("telemetry.internal:443", true, true),
+                candidate("postgres:5432", false, true), // reachable -> not returned
+            ],
+        );
+        assert_eq!(conclusions.len(), 1, "only the refused one classifies");
+        assert_eq!(conclusions[0].necessity(), Necessity::Optional);
+        assert!(conclusions[0].reason().contains("enforced a deny posture"));
+        assert!(conclusions[0].reason().contains("nothing was contacted"));
+        assert_eq!(conclusions[0].trials().len(), 2);
+    }
+
+    #[test]
+    fn enforced_deny_requires_a_stable_passing_baseline() {
+        let unstable = assess_baseline(&[TrialOutcome::passed(), TrialOutcome::failed("f")]);
+        assert!(classify_enforced_deny(
+            &unstable,
+            &["baseline-1".into()],
+            &[candidate("telemetry.internal:443", true, true)],
+        )
+        .is_empty());
     }
 
     #[test]

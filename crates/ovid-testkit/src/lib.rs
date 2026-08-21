@@ -278,8 +278,22 @@ pub fn external_candidate(identity: &str, all_failed: bool) -> NetworkCandidate 
         key: ovid_domain::DependencyKey::network(identity),
         externally_controlled: true,
         all_failed,
+        enforced_unavailable: false,
         attempts: 3,
         failures: if all_failed { 3 } else { 0 },
+    }
+}
+
+/// Convenience: a network candidate the laboratory gateway refused under
+/// an enforced deny posture (nothing contacted).
+pub fn gateway_refused_candidate(identity: &str) -> NetworkCandidate {
+    NetworkCandidate {
+        key: ovid_domain::DependencyKey::network(identity),
+        externally_controlled: true,
+        all_failed: true,
+        enforced_unavailable: true,
+        attempts: 3,
+        failures: 3,
     }
 }
 

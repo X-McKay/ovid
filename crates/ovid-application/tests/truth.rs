@@ -4,7 +4,10 @@
 
 use ovid_application::{prove, JournalEvent, NullProgress, ProveError, ProvePolicy, ProveRequest};
 use ovid_domain::{AnalysisScope, DependencyKind, Necessity, TrialOutcome, WorldOutcome};
-use ovid_testkit::{executable_candidate, external_candidate, FixtureLaboratory, RecordingJournal};
+use ovid_testkit::{
+    executable_candidate, external_candidate, gateway_refused_candidate, FixtureLaboratory,
+    RecordingJournal,
+};
 
 fn request() -> ProveRequest {
     ProveRequest {
@@ -402,6 +405,34 @@ fn network_natural_counterfactual_skips_the_egress_trial() -> Result<(), ProveEr
     assert!(
         !lab.trials_run.iter().any(|l| l.starts_with("no-egress")),
         "already-demonstrated unavailability must not spend trials"
+    );
+    Ok(())
+}
+
+#[test]
+fn enforced_deny_refusal_proves_optional_without_a_trial() -> Result<(), ProveError> {
+    // Under the deny posture the gateway refused the only network
+    // candidate (nothing contacted) while the baseline passed: optional,
+    // credited to the enforcement — no deny-all trial needed.
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed(), TrialOutcome::passed()])
+        .with_baseline_candidates(vec![gateway_refused_candidate("telemetry.internal:443")]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    let classified = &report.conclusions[0];
+    assert_eq!(classified.conclusion.necessity(), Necessity::Optional);
+    assert!(
+        classified
+            .conclusion
+            .reason()
+            .contains("enforced a deny posture"),
+        "the label must credit the enforced refusal, not a passive outage: {}",
+        classified.conclusion.reason()
+    );
+    assert!(
+        !lab.trials_run.iter().any(|l| l.starts_with("no-egress")),
+        "an enforced refusal during baseline must not spend an egress trial"
     );
     Ok(())
 }

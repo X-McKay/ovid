@@ -213,6 +213,17 @@ detail. Credential-bearing upstream URLs are rejected, and the gateway
 never forwards a request the policy refuses — so the "no real traffic"
 guarantee is enforced, not advisory.
 
+Because the deny gateway *enforces* each refusal (nothing is contacted),
+a destination it refused while the baseline still passed is an enforced
+counterfactual, not a happenstance outage: the classifier labels it
+`optional` in scope via `classify_enforced_deny`, crediting the
+enforcement itself (ADR-014) and naming it as such — distinct from a
+`natural counterfactual` (a host that merely happened to be unreachable)
+and from the `forward-failed` decision (a genuine connect failure, which
+is *not* enforced and stays a natural counterfactual). So deny mode alone
+produces optional labels for attempted-and-survivable endpoints, with no
+trial spent.
+
 ## Execution backends
 
 ### Process backend (trusted repositories)

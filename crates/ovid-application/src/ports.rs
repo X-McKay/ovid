@@ -103,6 +103,12 @@ pub struct NetworkCandidate {
     pub externally_controlled: bool,
     /// Every observed attempt against this dependency failed.
     pub all_failed: bool,
+    /// Every failure was an *enforced* refusal by the laboratory gateway's
+    /// deny posture (nothing real was contacted), not a happenstance
+    /// outage or a genuinely unreachable host. Distinguishes an enforced
+    /// counterfactual from a merely natural one (spec §13.10, ADR-014).
+    #[serde(default)]
+    pub enforced_unavailable: bool,
     pub attempts: u64,
     pub failures: u64,
 }
@@ -302,6 +308,7 @@ pub fn merge_candidates(trials: &[&TrialObservations]) -> Vec<NetworkCandidate> 
                     existing.attempts += candidate.attempts;
                     existing.failures += candidate.failures;
                     existing.all_failed &= candidate.all_failed;
+                    existing.enforced_unavailable &= candidate.enforced_unavailable;
                     existing.externally_controlled |= candidate.externally_controlled;
                 })
                 .or_insert_with(|| candidate.clone());
@@ -381,6 +388,7 @@ mod tests {
                 key: DependencyKey::network("db:5432"),
                 externally_controlled: true,
                 all_failed: true,
+                enforced_unavailable: false,
                 attempts: 2,
                 failures: 2,
             }],
@@ -392,6 +400,7 @@ mod tests {
                 key: DependencyKey::network("db:5432"),
                 externally_controlled: true,
                 all_failed: false,
+                enforced_unavailable: false,
                 attempts: 1,
                 failures: 0,
             }],

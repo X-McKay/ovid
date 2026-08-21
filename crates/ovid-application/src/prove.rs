@@ -21,9 +21,10 @@ use crate::ports::{
 };
 use crate::workflow::{AnalysisState, Workflow};
 use ovid_domain::{
-    assess_baseline, classify_intervention, classify_natural_counterfactual,
-    classify_unenforceable, AnalysisScope, BaselineVerdict, CandidateEvidence, CausalConclusion,
-    DependencyKey, ReplayEvidence, Treatment, TrialRecord, WorldCandidate, WorldOutcome,
+    assess_baseline, classify_enforced_deny, classify_intervention,
+    classify_natural_counterfactual, classify_unenforceable, AnalysisScope, BaselineVerdict,
+    CandidateEvidence, CausalConclusion, DependencyKey, ReplayEvidence, Treatment, TrialRecord,
+    WorldCandidate, WorldOutcome,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -455,12 +456,34 @@ pub fn prove(
             classify_intervention(&baseline, &[], &evidence),
         )?;
     } else {
-        // Step 1 — natural counterfactuals (proposal §10.5 step 1):
-        // dependencies demonstrably unavailable while the baseline
-        // passed are optional without spending a trial.
+        // Step 1a — enforced deny counterfactuals (spec §13.10, ADR-014):
+        // destinations the laboratory gateway *refused* under the deny
+        // posture (nothing contacted) while the baseline passed are
+        // optional, credited to the enforcement itself — no trial spent.
+        let enforced: Vec<CandidateEvidence> = network_candidates
+            .iter()
+            .filter(|c| c.all_failed && c.enforced_unavailable)
+            .map(|c| network_evidence(c, true))
+            .collect();
+        if !enforced.is_empty() {
+            progress.emit(
+                "experiments",
+                &format!("{} enforced deny counterfactual(s) reused", enforced.len()),
+            );
+            journal_conclusions(
+                journal,
+                &mut conclusions,
+                classify_enforced_deny(&baseline, &baseline_labels, &enforced),
+            )?;
+        }
+
+        // Step 1b — natural counterfactuals (proposal §10.5 step 1):
+        // dependencies demonstrably unavailable for other reasons (a
+        // missing executable, a genuinely unreachable host) while the
+        // baseline passed are optional without spending a trial.
         let natural: Vec<CandidateEvidence> = network_candidates
             .iter()
-            .filter(|c| c.all_failed)
+            .filter(|c| c.all_failed && !c.enforced_unavailable)
             .map(|c| network_evidence(c, true))
             .chain(
                 executable_candidates
