@@ -1278,8 +1278,10 @@ pub fn run_tomography(
     // counterfactual pair — it exists to create the world, not test it.
     // ------------------------------------------------------------------
     let predicate = SuccessPredicate::ExitCode { expected: 0 };
+    let mut executed_commands: Vec<Vec<String>> = Vec::new();
     if let Some(install) = graph.candidates(ActionKind::DependencyInstall).first() {
         manifest.build.commands.push(install.command.clone());
+        executed_commands.push(install.command.clone());
         ctx.record(
             "action-selected",
             "ovid-planner",
@@ -1319,7 +1321,6 @@ pub fn run_tomography(
     // ------------------------------------------------------------------
     // Workload pairs: up to max_candidates per requested kind.
     // ------------------------------------------------------------------
-    let mut executed_commands: Vec<Vec<String>> = Vec::new();
     let mut last_online: Option<(WorkloadExecution, Vec<String>)> = None;
     for kind_name in workload_kinds {
         let kind = match kind_name.as_str() {
