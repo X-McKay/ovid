@@ -136,10 +136,8 @@ pub fn analyze_network(
             }
             BoundaryEvent::SocketConnect {
                 address, port: 53, ..
-            } => {
-                if !dns_servers.contains(address) {
-                    dns_servers.push(address.clone());
-                }
+            } if !dns_servers.contains(address) => {
+                dns_servers.push(address.clone());
             }
             _ => {}
         }
@@ -205,10 +203,8 @@ pub fn analyze_network(
                     });
                 entry.evidence.push(envelope.event_id.clone());
             }
-            BoundaryEvent::UnixSocketConnected { path, .. } => {
-                if !unix_sockets.contains(path) {
-                    unix_sockets.push(path.clone());
-                }
+            BoundaryEvent::UnixSocketConnected { path, .. } if !unix_sockets.contains(path) => {
+                unix_sockets.push(path.clone());
             }
             _ => {}
         }
