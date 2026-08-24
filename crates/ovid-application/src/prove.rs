@@ -15,16 +15,16 @@
 //! and is journaled before it appears in any projection.
 
 use crate::ports::{
-    merge_candidates, merge_executables, EgressIntent, ExecutableCandidate, JournalError,
-    JournalEvent, JournalPort, LabError, LaboratoryPort, NetworkCandidate, ProgressPort,
-    TrialResult, TrialSpec,
+    merge_candidates, merge_executables, merge_nfs_candidates, EgressIntent, ExecutableCandidate,
+    JournalError, JournalEvent, JournalPort, LabError, LaboratoryPort, NetworkCandidate,
+    NfsCandidate, ProgressPort, TrialResult, TrialSpec,
 };
 use crate::workflow::{AnalysisState, Workflow};
 use ovid_domain::{
     assess_baseline, classify_enforced_deny, classify_intervention,
-    classify_natural_counterfactual, classify_unenforceable, AnalysisScope, BaselineVerdict,
-    CandidateEvidence, CausalConclusion, DependencyKey, ReplayEvidence, Treatment, TrialRecord,
-    WorldCandidate, WorldOutcome,
+    classify_natural_counterfactual, classify_observed_without_treatment, classify_unenforceable,
+    AnalysisScope, BaselineVerdict, CandidateEvidence, CausalConclusion, DependencyKey,
+    ReplayEvidence, Treatment, TrialRecord, WorldCandidate, WorldOutcome,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -108,6 +108,10 @@ pub struct ProveReport {
     pub egress_intents: Vec<EgressIntent>,
     /// Environment-provided executables observed during baseline (merged).
     pub executable_candidates: Vec<ExecutableCandidate>,
+    /// Mounted NFS server/exports and per-file operations observed during
+    /// baseline. These remain causally unresolved until an enforced mount
+    /// treatment is available.
+    pub nfs_candidates: Vec<NfsCandidate>,
     pub trials: Vec<TrialRecord>,
     pub conclusions: Vec<ClassifiedDependency>,
     pub world: WorldOutcome,
@@ -309,7 +313,7 @@ pub fn prove(
         if *trials_executed >= policy.max_trials {
             return Ok(None);
         }
-        let result = lab.run_trial(
+        let mut result = lab.run_trial(
             &snapshot,
             &TrialSpec {
                 label,
@@ -330,6 +334,15 @@ pub fn prove(
                 trial: result.record.label.clone(),
                 intents: result.observations.egress_intents.clone(),
             })?;
+        }
+        if !result.observations.nfs.is_empty() {
+            let evidence = journal.append(&JournalEvent::NfsAccessObserved {
+                trial: result.record.label.clone(),
+                filesystems: result.observations.nfs.clone(),
+            })?;
+            for filesystem in &mut result.observations.nfs {
+                filesystem.evidence.push(evidence.clone());
+            }
         }
         if let Some(signature) = &result.record.outcome.failure_signature {
             progress.emit(
@@ -397,6 +410,7 @@ pub fn prove(
         .filter(|c| c.externally_controlled)
         .collect();
     let executable_candidates: Vec<ExecutableCandidate> = merge_executables(&baseline_observations);
+    let nfs_candidates: Vec<NfsCandidate> = merge_nfs_candidates(&baseline_observations);
     // Named egress intents from the baseline posture — what the workload
     // tried to reach — deduplicated for the report.
     let mut egress_intents: Vec<EgressIntent> = Vec::new();
@@ -412,9 +426,10 @@ pub fn prove(
     progress.emit(
         "observation",
         &format!(
-            "{} network / {} executable candidate(s)",
+            "{} network / {} executable / {} NFS candidate(s)",
             network_candidates.len(),
-            executable_candidates.len()
+            executable_candidates.len(),
+            nfs_candidates.len()
         ),
     );
 
@@ -437,6 +452,12 @@ pub fn prove(
         unavailable_under_treatment: unavailable,
         attempted_in_baseline: true,
     };
+    let nfs_evidence = |candidate: &NfsCandidate| CandidateEvidence {
+        key: candidate.key.clone(),
+        externally_controlled: true,
+        unavailable_under_treatment: false,
+        attempted_in_baseline: true,
+    };
 
     if !baseline.supports_experiments() {
         // No experiments can run; every observed candidate stays
@@ -449,6 +470,7 @@ pub fn prove(
                     .iter()
                     .map(|e| executable_evidence(&e.name, !e.found)),
             )
+            .chain(nfs_candidates.iter().map(nfs_evidence))
             .collect();
         journal_conclusions(
             journal,
@@ -456,6 +478,26 @@ pub fn prove(
             classify_intervention(&baseline, &[], &evidence),
         )?;
     } else {
+        if !nfs_candidates.is_empty() {
+            limitations.push(format!(
+                "{} NFS server/export dependency candidate(s) were observed, but this \
+                 laboratory cannot enforce per-mount removal or replacement; they remain \
+                 unresolved",
+                nfs_candidates.len()
+            ));
+            let evidence: Vec<CandidateEvidence> =
+                nfs_candidates.iter().map(nfs_evidence).collect();
+            journal_conclusions(
+                journal,
+                &mut conclusions,
+                classify_observed_without_treatment(
+                    &baseline,
+                    &evidence,
+                    "per-mount removal or controlled NFS fixture replacement is unavailable",
+                ),
+            )?;
+        }
+
         // Step 1a — enforced deny counterfactuals (spec §13.10, ADR-014):
         // destinations the laboratory gateway *refused* under the deny
         // posture (nothing contacted) while the baseline passed are
@@ -814,6 +856,21 @@ pub fn prove(
                 world: proposed,
                 reason: "replay disabled by policy".into(),
             }
+        } else if proposed
+            .candidate()
+            .unresolved
+            .iter()
+            .any(|key| key.kind == ovid_domain::DependencyKind::NetworkFilesystem)
+        {
+            // A clean replay with the same live mount would only repeat
+            // the observation; it would not verify a self-contained
+            // world. Keep the lock proposed until an enforceable mount
+            // treatment can be represented and replayed.
+            workflow.advance(AnalysisState::ReplayUnavailable);
+            WorldOutcome::Proposed {
+                world: proposed,
+                reason: "observed NFS dependencies have no enforceable world treatment".into(),
+            }
         } else if trials_executed >= policy.max_trials {
             workflow.advance(AnalysisState::ReplayUnavailable);
             WorldOutcome::Proposed {
@@ -873,6 +930,7 @@ pub fn prove(
         network_candidates,
         egress_intents,
         executable_candidates,
+        nfs_candidates,
         trials,
         conclusions,
         world,

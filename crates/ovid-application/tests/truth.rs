@@ -5,8 +5,8 @@
 use ovid_application::{prove, JournalEvent, NullProgress, ProveError, ProvePolicy, ProveRequest};
 use ovid_domain::{AnalysisScope, DependencyKind, Necessity, TrialOutcome, WorldOutcome};
 use ovid_testkit::{
-    executable_candidate, external_candidate, gateway_refused_candidate, FixtureLaboratory,
-    RecordingJournal,
+    executable_candidate, external_candidate, gateway_refused_candidate, nfs_candidate,
+    FixtureLaboratory, RecordingJournal,
 };
 
 fn request() -> ProveRequest {
@@ -76,6 +76,49 @@ fn optional_service_is_proven_by_passing_without_it() -> Result<(), ProveError> 
         Necessity::Optional
     );
     assert!(matches!(report.world, WorldOutcome::Verified { .. }));
+    Ok(())
+}
+
+#[test]
+fn observed_nfs_access_is_evidenced_but_remains_unresolved() -> Result<(), ProveError> {
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_nfs(vec![nfs_candidate(
+            "files.internal",
+            "/exports/models",
+            "/mnt/models",
+            "/weights/model.bin",
+        )]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    assert_eq!(report.nfs_candidates.len(), 1);
+    assert!(!report.nfs_candidates[0].evidence.is_empty());
+    let classified = report
+        .conclusions
+        .iter()
+        .find(|classified| {
+            classified.conclusion.dependency().kind == DependencyKind::NetworkFilesystem
+        })
+        .expect("NFS conclusion");
+    assert_eq!(classified.conclusion.necessity(), Necessity::Unresolved);
+    assert!(classified
+        .conclusion
+        .reason()
+        .contains("no enforced counterfactual"));
+    assert!(journal.events.iter().any(|event| matches!(
+        event,
+        JournalEvent::NfsAccessObserved { filesystems, .. } if filesystems.len() == 1
+    )));
+    assert!(report
+        .limitations
+        .iter()
+        .any(|limitation| limitation.contains("per-mount removal")));
+    assert!(matches!(report.world, WorldOutcome::Proposed { .. }));
+    assert!(
+        !lab.trials_run.iter().any(|label| label == "replay"),
+        "repeating the same live mount is not world verification"
+    );
     Ok(())
 }
 

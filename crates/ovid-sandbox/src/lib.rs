@@ -33,8 +33,12 @@ mod unsupported;
 /// and the guest is always Linux — so observation and network
 /// counterfactuals behave identically on every host.
 pub mod microsandbox;
+pub mod mounts;
 
 pub use microsandbox::MicrosandboxBackend;
+pub use mounts::{
+    discover_nfs_mounts, mount_for_path, parse_mount_output, parse_mountinfo, NfsMount,
+};
 
 #[cfg(unix)]
 pub use process::{network_isolation_available, ProcessBackend};

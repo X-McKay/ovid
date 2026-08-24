@@ -23,7 +23,8 @@
 use anyhow::{bail, Result};
 use ovid_application::{
     EgressIntent, ExecutableCandidate, LabCapabilities, LabError, LaboratoryPort, NetworkCandidate,
-    PreparedEnvironment, ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
+    NfsCandidate, NfsFileAccess, PreparedEnvironment, ProviderIdentity, SnapshotRef,
+    TrialObservations, TrialResult, TrialSpec,
 };
 use ovid_core::{BoundaryEvent, Digest, EventEnvelope};
 use ovid_domain::{
@@ -33,7 +34,8 @@ use ovid_gateway::{GatewayIntent, GatewayPolicy, GatewayServer, Upstream};
 use ovid_observer::aggregate;
 use ovid_packs::PackRegistry;
 use ovid_sandbox::{
-    network_isolation_available, ExecutionBackend, NetworkMode, RunResult, RunSpec, WorkspaceMode,
+    discover_nfs_mounts, mount_for_path, network_isolation_available, ExecutionBackend,
+    NetworkMode, RunResult, RunSpec, WorkspaceMode,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -473,6 +475,9 @@ impl HostLaboratory {
             Some(observation) => (observation.events.clone(), true),
             None => (vec![], false),
         };
+        // Preserve repeated file operations for NFS access counts before
+        // the general observer aggregation collapses duplicate signatures.
+        let nfs = self.nfs_candidates(&events);
         let aggregated = aggregate(events);
         let network =
             ovid_gateway::analyze_network(&aggregated.events, &self.registry, &BTreeMap::new());
@@ -494,9 +499,23 @@ impl HostLaboratory {
             network: candidates,
             egress_intents: Vec::new(), // filled by merge_intent_candidates
             executables: self.executable_candidates(&aggregated.events, spec, trial_dir),
+            nfs,
             observed,
             events_captured: aggregated.events.len() as u64,
         }
+    }
+
+    /// Correlate observed file operations with the process mount
+    /// namespace's NFS table. The NFS client's network traffic happens in
+    /// the kernel, so mount metadata—not workload socket connects—is the
+    /// authoritative server/export identity.
+    fn nfs_candidates(&self, events: &[EventEnvelope]) -> Vec<NfsCandidate> {
+        if self.kind != BackendKind::Process {
+            // Host mountinfo does not describe the guest VM namespace.
+            return Vec::new();
+        }
+        let mounts = discover_nfs_mounts();
+        nfs_candidates_from_events(events, &mounts)
     }
 
     /// Environment-provided executable candidates from one trial's events
@@ -715,6 +734,102 @@ impl HostLaboratory {
             evidence: vec![],
         }
     }
+}
+
+fn nfs_candidates_from_events(
+    events: &[EventEnvelope],
+    mounts: &[ovid_sandbox::NfsMount],
+) -> Vec<NfsCandidate> {
+    let mut candidates: BTreeMap<DependencyKey, NfsCandidate> = BTreeMap::new();
+    for envelope in events {
+        let (path, write, failed) = match &envelope.event {
+            BoundaryEvent::FileOpened { path, errno, write } => {
+                (path.as_str(), *write, errno.is_some())
+            }
+            BoundaryEvent::SharedObjectMapped { path } => (path.as_str(), false, false),
+            _ => continue,
+        };
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            // A relative open cannot be attributed safely without tracking
+            // per-process chdir/fchdir state. Unresolved beats a wrong mount.
+            continue;
+        }
+        if path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            // Lexically matching `/mnt/nfs/../local` would attribute a
+            // local target to NFS. Ignore ambiguous traversal instead.
+            continue;
+        }
+        let Some(mount) = mount_for_path(path, mounts) else {
+            continue;
+        };
+        let identity = mount.identity();
+        let key = DependencyKey::network_filesystem(&identity);
+        let mount_point = mount.mount_point.display().to_string();
+        let relative = path
+            .strip_prefix(&mount.mount_point)
+            .ok()
+            .map(|suffix| {
+                let display = suffix.display().to_string();
+                if display.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{display}")
+                }
+            })
+            .unwrap_or_else(|| path.display().to_string());
+        let candidate = candidates
+            .entry(key.clone())
+            .or_insert_with(|| NfsCandidate {
+                key,
+                server: mount.server.clone(),
+                export: mount.export.clone(),
+                fs_types: vec![mount.fs_type.clone()],
+                mount_points: vec![mount_point.clone()],
+                read_only: mount.read_only,
+                accesses: Vec::new(),
+                evidence: Vec::new(),
+            });
+        candidate.read_only &= mount.read_only;
+        if !candidate.fs_types.contains(&mount.fs_type) {
+            candidate.fs_types.push(mount.fs_type.clone());
+        }
+        if !candidate.mount_points.contains(&mount_point) {
+            candidate.mount_points.push(mount_point.clone());
+        }
+        match candidate
+            .accesses
+            .iter_mut()
+            .find(|access| access.mount_point == mount_point && access.path == relative)
+        {
+            Some(access) => {
+                if write {
+                    access.write_attempts += 1;
+                } else {
+                    access.read_attempts += 1;
+                }
+                access.failures += u64::from(failed);
+            }
+            None => candidate.accesses.push(NfsFileAccess {
+                mount_point,
+                path: relative,
+                read_attempts: u64::from(!write),
+                write_attempts: u64::from(write),
+                failures: u64::from(failed),
+            }),
+        }
+    }
+    for candidate in candidates.values_mut() {
+        candidate.fs_types.sort();
+        candidate.mount_points.sort();
+        candidate
+            .accesses
+            .sort_by(|a, b| (&a.mount_point, &a.path).cmp(&(&b.mount_point, &b.path)));
+    }
+    candidates.into_values().collect()
 }
 
 impl LaboratoryPort for HostLaboratory {
@@ -1117,6 +1232,97 @@ fn merge_intent_candidates(observations: &mut TrialObservations, intents: &[Gate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn boundary_event(sequence: u64, event: BoundaryEvent) -> EventEnvelope {
+        EventEnvelope {
+            event_id: ovid_core::OvidId::from_string(format!("evidence:test-{sequence}")),
+            run_id: ovid_core::OvidId::from_string("run:test"),
+            sequence,
+            wall_time: None,
+            provider: "test".into(),
+            provider_version: "0".into(),
+            trust_tier: ovid_core::TrustTier::T2,
+            process: None,
+            event,
+        }
+    }
+
+    #[test]
+    fn nfs_file_events_are_correlated_and_aggregated_without_content() {
+        let mounts = vec![ovid_sandbox::NfsMount {
+            mount_point: PathBuf::from("/mnt/models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_type: "nfs4".into(),
+            read_only: false,
+        }];
+        let events = vec![
+            boundary_event(
+                1,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/weights/model.bin".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                2,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/weights/model.bin".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                3,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/output.tmp".into(),
+                    errno: Some("EROFS".into()),
+                    write: true,
+                },
+            ),
+            boundary_event(
+                4,
+                BoundaryEvent::FileOpened {
+                    path: "/tmp/local.txt".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                5,
+                BoundaryEvent::FileOpened {
+                    path: "relative-to-unknown-cwd".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                6,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/../local.txt".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+        ];
+
+        let candidates = nfs_candidates_from_events(&events, &mounts);
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(
+            candidate.key.logical_identity,
+            "files.internal:/exports/models"
+        );
+        assert_eq!(candidate.accesses.len(), 2);
+        assert_eq!(candidate.accesses[0].path, "/output.tmp");
+        assert_eq!(candidate.accesses[0].write_attempts, 1);
+        assert_eq!(candidate.accesses[0].failures, 1);
+        assert_eq!(candidate.accesses[1].path, "/weights/model.bin");
+        assert_eq!(candidate.accesses[1].read_attempts, 2);
+        let json = serde_json::to_string(candidate).unwrap();
+        assert!(!json.contains("file contents"));
+    }
 
     #[test]
     fn full_copy_preserves_provisioned_caches() {

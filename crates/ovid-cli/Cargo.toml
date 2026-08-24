@@ -32,3 +32,4 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+ovid-testkit.workspace = true

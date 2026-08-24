@@ -56,6 +56,23 @@ pub fn to_cyclonedx(manifest: &Manifest) -> Value {
                 ],
             })
         })
+        .chain(manifest.external_filesystems.iter().map(|filesystem| {
+            let server = if filesystem.server.contains(':') {
+                format!("[{}]", filesystem.server)
+            } else {
+                filesystem.server.clone()
+            };
+            json!({
+                "name": filesystem.id,
+                "endpoints": [format!("nfs://{server}{}", filesystem.export)],
+                "properties": [
+                    { "name": "ovid:protocol", "value": filesystem.protocols.join(",") },
+                    { "name": "ovid:causality",
+                      "value": filesystem.causality.map(|c| format!("{c:?}")).unwrap_or_else(|| "unknown".into()) },
+                    { "name": "ovid:mount-points", "value": filesystem.mount_points.join(",") },
+                ],
+            })
+        }))
         .collect();
 
     json!({
@@ -117,7 +134,9 @@ pub fn to_spdx(manifest: &Manifest) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{ExternalSystemReport, Manifest, RepositorySection};
+    use crate::manifest::{
+        ExternalSystemReport, Manifest, NetworkFilesystemReport, RepositorySection,
+    };
     use ovid_core::{ClaimState, ClaimStates, Digest};
     use ovid_inventory::{Component, Scope};
 
@@ -166,6 +185,17 @@ mod tests {
             declared_sources: Vec::new(),
             evidence: vec!["evidence:1".into()],
         });
+        manifest.external_filesystems.push(NetworkFilesystemReport {
+            id: "files.internal:/models".into(),
+            protocols: vec!["nfs4".into()],
+            server: "files.internal".into(),
+            export: "/models".into(),
+            mount_points: vec!["/mnt/models".into()],
+            read_only: true,
+            accesses: Vec::new(),
+            causality: Some(ovid_core::CausalClassification::Unresolved),
+            evidence: vec!["evidence:2".into()],
+        });
         manifest
     }
 
@@ -183,6 +213,11 @@ mod tests {
             .iter()
             .any(|p| p["name"] == "ovid:state:exercised"));
         assert_eq!(bom["services"][0]["name"], "orders-db");
+        assert_eq!(bom["services"][1]["name"], "files.internal:/models");
+        assert_eq!(
+            bom["services"][1]["endpoints"][0],
+            "nfs://files.internal/models"
+        );
     }
 
     #[test]

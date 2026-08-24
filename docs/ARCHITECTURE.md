@@ -263,6 +263,29 @@ repositories" on any Linux host:
 It is **not** a security boundary; its `IsolationTier::TrustedProcess`
 is recorded in every manifest so isolation claims stay honest.
 
+### Mounted NFS observation
+
+For trusted-process trials, Ovid inventories the mount namespace visible to
+the workload (`/proc/self/mountinfo` on Linux; the system mount table on
+macOS/BSD), retains only NFS/NFSv4 mounts, and correlates absolute
+`file-opened` and `shared-object-mapped` events with the most-specific mount
+point. Repeated events are aggregated per server/export, mount point, and
+relative path. The ledger and manifest record access direction and failures,
+but never file contents, credentials, or raw mount options.
+
+This is observation evidence, not an intervention: a successful access proves
+that the mounted export was used in the analyzed run, but cannot establish
+whether it was required. Until a laboratory can enforce mount removal or bind
+a controlled replacement fixture, the dependency is classified `unresolved`,
+the limitation is explicit, and a world containing it remains `proposed`.
+Relative paths are not attributed because doing so safely requires
+per-process working-directory tracking. Guest-VM trials also omit this
+correlation today because the host mount table does not describe the guest
+namespace. Although macOS/BSD mount-table parsing is supported, current
+process boundary observation is strace-based, so end-to-end correlation is
+currently Linux-only. Absence from either unsupported path is not evidence of
+absence.
+
 ### microsandbox backend (host-independent guest VMs)
 
 `ovid-sandbox/src/microsandbox.rs` drives the `msb` CLI

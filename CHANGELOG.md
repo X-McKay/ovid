@@ -10,6 +10,15 @@ the workspace version in `Cargo.toml`. The release workflow
 
 ### Added
 
+- **Mounted NFS dependency evidence.** Linux process-backend trials now
+  correlate observed absolute file opens and shared-object mappings with
+  NFS/NFSv4 mount tables (Linux `/proc` plus a tested macOS/BSD table parser;
+  runtime correlation there awaits a boundary observer). The typed T2 journal
+  event, proof, and manifest preserve server/export identity, mount points,
+  relative paths, read/write/failure counts, and evidence links without recording contents,
+  credentials, or raw mount options. Because observation is not a
+  counterfactual, these dependencies remain explicitly `unresolved`; their
+  world-lock cells stay `proposed` until a mount treatment can be enforced.
 - **Laboratory gateway — egress by name (ADR-017, spec §13.10).** A
   lab-controlled, std-only HTTP proxy names every destination a workload
   tries to reach (scheme, host, port, method, path) even when a loopback

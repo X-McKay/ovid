@@ -130,6 +130,39 @@ pub struct ExecutableCandidate {
     pub resolver_hint: Option<String>,
 }
 
+/// Aggregated accesses to one path below a mounted network filesystem.
+/// Paths are relative to the mount point and file contents are never
+/// captured (spec §12.1, §13.7).
+#[derive(Clone, PartialEq, Eq, Serialize, Debug)]
+pub struct NfsFileAccess {
+    /// Mount point through which the file was accessed.
+    pub mount_point: String,
+    /// Path relative to the mount root (`/` denotes the root itself).
+    pub path: String,
+    pub read_attempts: u64,
+    pub write_attempts: u64,
+    pub failures: u64,
+}
+
+/// An NFS server/export observed through file access during a trial.
+#[derive(Clone, PartialEq, Eq, Serialize, Debug)]
+pub struct NfsCandidate {
+    pub key: DependencyKey,
+    pub server: String,
+    pub export: String,
+    /// Filesystem variants observed (`nfs`, `nfs4`).
+    pub fs_types: Vec<String>,
+    /// All local mount points mapping this export.
+    pub mount_points: Vec<String>,
+    /// True only when every observed mount of the export was read-only.
+    pub read_only: bool,
+    /// Deduplicated per-file access records.
+    pub accesses: Vec<NfsFileAccess>,
+    /// Ledger ids of `nfs-access-observed` records supporting this entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+}
+
 /// One egress request the laboratory gateway named during a trial: what
 /// the workload tried to reach and what the policy did about it. The
 /// full record (method, path, decision) is richer than the host:port
@@ -161,6 +194,9 @@ pub struct TrialObservations {
     /// for (workspace-internal tools are provisioned content, not
     /// environment dependencies, and are excluded).
     pub executables: Vec<ExecutableCandidate>,
+    /// NFS server/exports reached through observed file operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nfs: Vec<NfsCandidate>,
     /// Whether boundary observation actually ran (honesty over silence).
     pub observed: bool,
     pub events_captured: u64,
@@ -263,6 +299,13 @@ pub enum JournalEvent {
         trial: String,
         intents: Vec<EgressIntent>,
     },
+    /// File operations attributed to mounted NFS server/exports. This is
+    /// observation evidence only; causal necessity remains unresolved until
+    /// an enforced mount treatment is available.
+    NfsAccessObserved {
+        trial: String,
+        filesystems: Vec<NfsCandidate>,
+    },
     LimitationRecorded {
         detail: String,
     },
@@ -333,6 +376,57 @@ pub fn merge_executables(trials: &[&TrialObservations]) -> Vec<ExecutableCandida
                 })
                 .or_insert_with(|| candidate.clone());
         }
+    }
+    merged.into_values().collect()
+}
+
+/// Merge NFS observations across repeated trials deterministically.
+pub fn merge_nfs_candidates(trials: &[&TrialObservations]) -> Vec<NfsCandidate> {
+    let mut merged: BTreeMap<DependencyKey, NfsCandidate> = BTreeMap::new();
+    for observations in trials {
+        for candidate in &observations.nfs {
+            merged
+                .entry(candidate.key.clone())
+                .and_modify(|existing| {
+                    existing.read_only &= candidate.read_only;
+                    for fs_type in &candidate.fs_types {
+                        if !existing.fs_types.contains(fs_type) {
+                            existing.fs_types.push(fs_type.clone());
+                        }
+                    }
+                    for mount_point in &candidate.mount_points {
+                        if !existing.mount_points.contains(mount_point) {
+                            existing.mount_points.push(mount_point.clone());
+                        }
+                    }
+                    for access in &candidate.accesses {
+                        match existing.accesses.iter_mut().find(|record| {
+                            record.mount_point == access.mount_point && record.path == access.path
+                        }) {
+                            Some(record) => {
+                                record.read_attempts += access.read_attempts;
+                                record.write_attempts += access.write_attempts;
+                                record.failures += access.failures;
+                            }
+                            None => existing.accesses.push(access.clone()),
+                        }
+                    }
+                    for evidence in &candidate.evidence {
+                        if !existing.evidence.contains(evidence) {
+                            existing.evidence.push(evidence.clone());
+                        }
+                    }
+                })
+                .or_insert_with(|| candidate.clone());
+        }
+    }
+    for candidate in merged.values_mut() {
+        candidate.fs_types.sort();
+        candidate.mount_points.sort();
+        candidate.evidence.sort();
+        candidate
+            .accesses
+            .sort_by(|a, b| (&a.mount_point, &a.path).cmp(&(&b.mount_point, &b.path)));
     }
     merged.into_values().collect()
 }
@@ -414,5 +508,39 @@ mod tests {
             "one success anywhere means available"
         );
         assert_eq!(merged[0].attempts, 3);
+    }
+
+    #[test]
+    fn merge_nfs_candidates_combines_mounts_accesses_and_evidence() {
+        let candidate = |mount: &str, reads: u64, read_only: bool, evidence: &str| NfsCandidate {
+            key: DependencyKey::network_filesystem("files.internal:/exports/models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_types: vec!["nfs4".into()],
+            mount_points: vec![mount.into()],
+            read_only,
+            accesses: vec![NfsFileAccess {
+                mount_point: mount.into(),
+                path: "/model.bin".into(),
+                read_attempts: reads,
+                write_attempts: 0,
+                failures: 0,
+            }],
+            evidence: vec![evidence.into()],
+        };
+        let a = TrialObservations {
+            nfs: vec![candidate("/mnt/a", 2, true, "evidence:1")],
+            ..Default::default()
+        };
+        let b = TrialObservations {
+            nfs: vec![candidate("/mnt/a", 1, false, "evidence:2")],
+            ..Default::default()
+        };
+
+        let merged = merge_nfs_candidates(&[&a, &b]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].accesses[0].read_attempts, 3);
+        assert!(!merged[0].read_only);
+        assert_eq!(merged[0].evidence, vec!["evidence:1", "evidence:2"]);
     }
 }

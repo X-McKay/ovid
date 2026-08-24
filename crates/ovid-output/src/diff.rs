@@ -13,6 +13,8 @@ pub struct ManifestDiff {
     pub version_changes: BTreeMap<String, (String, String)>,
     pub external_added: Vec<String>,
     pub external_removed: Vec<String>,
+    pub external_filesystems_added: Vec<String>,
+    pub external_filesystems_removed: Vec<String>,
     pub listeners_added: Vec<u16>,
     pub listeners_removed: Vec<u16>,
     pub tools_added: Vec<String>,
@@ -26,6 +28,8 @@ impl ManifestDiff {
             && self.version_changes.is_empty()
             && self.external_added.is_empty()
             && self.external_removed.is_empty()
+            && self.external_filesystems_added.is_empty()
+            && self.external_filesystems_removed.is_empty()
             && self.listeners_added.is_empty()
             && self.listeners_removed.is_empty()
             && self.tools_added.is_empty()
@@ -57,6 +61,16 @@ impl ManifestDiff {
         }
         section("External systems added", &self.external_added, &mut out);
         section("External systems removed", &self.external_removed, &mut out);
+        section(
+            "External filesystems added",
+            &self.external_filesystems_added,
+            &mut out,
+        );
+        section(
+            "External filesystems removed",
+            &self.external_filesystems_removed,
+            &mut out,
+        );
         section("Tools added", &self.tools_added, &mut out);
         section("Tools removed", &self.tools_removed, &mut out);
         if !self.listeners_added.is_empty() || !self.listeners_removed.is_empty() {
@@ -126,6 +140,26 @@ pub fn diff_manifests(before: &Manifest, after: &Manifest) -> ManifestDiff {
         .cloned()
         .collect();
 
+    let filesystems = |manifest: &Manifest| -> Vec<String> {
+        manifest
+            .external_filesystems
+            .iter()
+            .map(|filesystem| filesystem.id.clone())
+            .collect()
+    };
+    let before_filesystems = filesystems(before);
+    let after_filesystems = filesystems(after);
+    diff.external_filesystems_added = after_filesystems
+        .iter()
+        .filter(|id| !before_filesystems.contains(id))
+        .cloned()
+        .collect();
+    diff.external_filesystems_removed = before_filesystems
+        .iter()
+        .filter(|id| !after_filesystems.contains(id))
+        .cloned()
+        .collect();
+
     let listeners = |manifest: &Manifest| -> Vec<u16> {
         manifest.runtime.listeners.iter().map(|l| l.port).collect()
     };
@@ -169,7 +203,7 @@ pub fn diff_manifests(before: &Manifest, after: &Manifest) -> ManifestDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{Manifest, RepositorySection};
+    use crate::manifest::{Manifest, NetworkFilesystemReport, RepositorySection};
     use ovid_core::{ClaimState, ClaimStates, Digest};
     use ovid_inventory::{Component, Scope};
 
@@ -230,5 +264,28 @@ mod tests {
         let diff = diff_manifests(&a, &b);
         assert!(diff.is_empty());
         assert!(diff.to_markdown().contains("No material differences"));
+    }
+
+    #[test]
+    fn mounted_filesystem_changes_are_material() {
+        let before = base("1.0.100");
+        let mut after = before.clone();
+        after.external_filesystems.push(NetworkFilesystemReport {
+            id: "files.internal:/models".into(),
+            protocols: vec!["nfs4".into()],
+            server: "files.internal".into(),
+            export: "/models".into(),
+            mount_points: vec!["/mnt/models".into()],
+            read_only: true,
+            accesses: Vec::new(),
+            causality: None,
+            evidence: Vec::new(),
+        });
+        let diff = diff_manifests(&before, &after);
+        assert_eq!(
+            diff.external_filesystems_added,
+            vec!["files.internal:/models"]
+        );
+        assert!(diff.to_markdown().contains("External filesystems added"));
     }
 }

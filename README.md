@@ -94,6 +94,17 @@ Supporting commands and machinery:
   rotation into one logical dependency), resolver bypass is flagged,
   and destinations with no observed resolution are explicitly marked
   `ip-only` rather than silently nameless.
+- **Mounted NFS dependency evidence** — on the trusted process backend,
+  observed absolute file opens and shared-object mappings are correlated
+  with the workload's visible NFS/NFSv4 mount table. Manifests record the
+  server, export, mount point, relative paths, read/write counts, failures,
+  and evidence ids—never file contents, credentials, or raw mount options.
+  Usage alone does not prove causality, so NFS dependencies remain
+  `unresolved` and the world stays `proposed` until Ovid can enforce mount
+  removal or controlled replacement. Linux `/proc` and macOS/BSD mount
+  tables are parsed, but end-to-end correlation currently requires the
+  strace observer and therefore runs on Linux; other hosts report the
+  observation limitation rather than claiming absence.
 - **Evidence ledger**: append-only, hash-chained JSONL with tamper
   detection; typed journal events; the chain head is published in every
   manifest's provenance.

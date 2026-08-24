@@ -20,8 +20,9 @@ pub mod workflow;
 
 pub use ports::{
     EgressIntent, ExecutableCandidate, JournalError, JournalEvent, JournalPort, LabCapabilities,
-    LabError, LaboratoryPort, NetworkCandidate, NullProgress, PreparedEnvironment, ProgressPort,
-    ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
+    LabError, LaboratoryPort, NetworkCandidate, NfsCandidate, NfsFileAccess, NullProgress,
+    PreparedEnvironment, ProgressPort, ProviderIdentity, SnapshotRef, TrialObservations,
+    TrialResult, TrialSpec,
 };
 pub use prove::{
     prove, run_clean_replay, ClassifiedDependency, ProveError, ProvePolicy, ProveReport,

@@ -21,8 +21,8 @@ use ovid_core::{CausalClassification, Digest, IdGenerator, OvidId, TrustTier};
 use ovid_domain::{AnalysisScope, DependencyKind, Necessity, WorldOutcome};
 use ovid_evidence::{Claim, ClaimStore, EvidenceLedger, EvidenceRecord};
 use ovid_output::{
-    ExternalSystemReport, Manifest, RepositorySection, ToolReport, UnresolvedItem, WorkloadReport,
-    WorldDependencySummary,
+    ExternalSystemReport, Manifest, NetworkFilesystemAccessReport, NetworkFilesystemReport,
+    RepositorySection, ToolReport, UnresolvedItem, WorkloadReport, WorldDependencySummary,
 };
 use ovid_packs::PackRegistry;
 use ovid_planner::ActionKind;
@@ -82,6 +82,9 @@ impl LedgerJournal {
             // Gateway-observed egress intents are directly enforced by a
             // trusted lab component (T1), not merely tool-derived.
             JournalEvent::EgressObserved { .. } => TrustTier::T1,
+            // Kernel-observed file operations correlated with the host's
+            // mount table. Strong observation, but not an intervention.
+            JournalEvent::NfsAccessObserved { .. } => TrustTier::T2,
             _ => TrustTier::T4,
         }
     }
@@ -405,6 +408,45 @@ fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
         });
     }
 
+    // NFS accesses -> mounted external filesystems. Observation proves
+    // use, not causal necessity, so these remain unresolved until the lab
+    // can enforce mount removal or replacement.
+    for candidate in &report.nfs_candidates {
+        let identity = &candidate.key.logical_identity;
+        let classified = conclusion_for(DependencyKind::NetworkFilesystem, identity);
+        let mut evidence = candidate.evidence.clone();
+        if let Some(classified) = classified {
+            evidence.push(classified.evidence.clone());
+        }
+        evidence.sort();
+        evidence.dedup();
+        manifest.external_filesystems.push(NetworkFilesystemReport {
+            id: identity.clone(),
+            protocols: candidate.fs_types.clone(),
+            server: candidate.server.clone(),
+            export: candidate.export.clone(),
+            mount_points: candidate.mount_points.clone(),
+            read_only: candidate.read_only,
+            accesses: candidate
+                .accesses
+                .iter()
+                .map(|access| NetworkFilesystemAccessReport {
+                    mount_point: access.mount_point.clone(),
+                    path: access.path.clone(),
+                    read_attempts: access.read_attempts,
+                    write_attempts: access.write_attempts,
+                    failures: access.failures,
+                })
+                .collect(),
+            causality: Some(
+                classified
+                    .map(|c| causality_of(c.conclusion.necessity()))
+                    .unwrap_or(CausalClassification::Unresolved),
+            ),
+            evidence,
+        });
+    }
+
     // Executable candidates -> build tools with causal labels; missing
     // tools carry their resolver-pack install hint as remediation.
     for candidate in &report.executable_candidates {
@@ -450,6 +492,11 @@ fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
             manifest.world.dependencies.push(WorldDependencySummary {
                 id: classified.conclusion.dependency().describe(),
                 treatment: "required".into(),
+            });
+        } else if classified.conclusion.dependency().kind == DependencyKind::NetworkFilesystem {
+            manifest.world.dependencies.push(WorldDependencySummary {
+                id: classified.conclusion.dependency().describe(),
+                treatment: "unresolved".into(),
             });
         }
     }
@@ -548,6 +595,27 @@ fn write_bundle(
                 },
                 aliases: vec![host],
                 port,
+                environment: Default::default(),
+            });
+        }
+        for key in &proposed.candidate().unresolved {
+            if key.kind != ovid_domain::DependencyKind::NetworkFilesystem {
+                continue;
+            }
+            let server = report
+                .nfs_candidates
+                .iter()
+                .find(|candidate| candidate.key == *key)
+                .map(|candidate| candidate.server.as_str())
+                .unwrap_or(&key.logical_identity);
+            world.dependencies.push(WorldDependency {
+                id: key.logical_identity.clone(),
+                treatment: WorldTreatment::Unresolved {
+                    reason: "NFS access was observed, but no enforced mount removal or controlled replacement was available"
+                        .into(),
+                },
+                aliases: vec![server.to_string()],
+                port: None,
                 environment: Default::default(),
             });
         }
@@ -755,19 +823,25 @@ pub fn run_replay(
     })?;
 
     // Update the lock's status from the outcome — never the other way.
+    // A passing rerun cannot verify a world that still contains an
+    // unresolved cell: it merely repeated the ambient dependency.
     let lock_path = bundle.join("world.lock.yaml");
+    let mut world_verified = result.record.outcome.passed;
     if let Ok(lock_text) = std::fs::read_to_string(&lock_path) {
         if let Ok(mut lock) = serde_yaml::from_str::<ovid_world::WorldLock>(&lock_text) {
-            lock.status = if result.record.outcome.passed {
-                WorldStatus::Verified
-            } else {
-                WorldStatus::ReplayFailed
-            };
+            lock.status = status_after_replay(&lock, result.record.outcome.passed);
+            world_verified = lock.status == WorldStatus::Verified;
             std::fs::write(&lock_path, lock.to_yaml())?;
         }
     }
     if result.record.outcome.passed {
-        println!("replay: verified (clean run passed)");
+        if world_verified {
+            println!("replay: verified (clean run passed)");
+        } else {
+            println!(
+                "replay: passed, world remains proposed (unresolved dependencies have no treatment)"
+            );
+        }
         Ok(0)
     } else {
         println!(
@@ -781,6 +855,16 @@ pub fn run_replay(
         );
         println!("{}", result.output_tail.trim_end());
         Ok(20)
+    }
+}
+
+fn status_after_replay(lock: &ovid_world::WorldLock, passed: bool) -> WorldStatus {
+    if !passed {
+        WorldStatus::ReplayFailed
+    } else if lock.cells.iter().any(|cell| cell.kind == "unresolved") {
+        WorldStatus::Proposed
+    } else {
+        WorldStatus::Verified
     }
 }
 
@@ -857,4 +941,86 @@ fn which(binary: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ovid_application::NullProgress;
+    use ovid_domain::TrialOutcome;
+    use ovid_testkit::{nfs_candidate, FixtureLaboratory, RecordingJournal};
+
+    #[test]
+    fn nfs_evidence_reaches_proof_manifest_and_proposed_world_lock() {
+        let request = ProveRequest {
+            scope: AnalysisScope {
+                repository: "fixture://nfs".into(),
+                revision: "deadbeef".into(),
+                workload: "read-model".into(),
+                workload_argv: vec!["read-model".into()],
+                success_predicate: "exit-code == 0".into(),
+                execution_policy: "fixture".into(),
+                ..Default::default()
+            },
+            provision_argv: None,
+        };
+        let mut lab = FixtureLaboratory::new()
+            .with_baseline_outcomes(vec![TrialOutcome::passed()])
+            .with_baseline_nfs(vec![nfs_candidate(
+                "files.internal",
+                "/exports/models",
+                "/mnt/models",
+                "/weights/model.bin",
+            )]);
+        let mut recording = RecordingJournal::default();
+        let report = prove(
+            &mut lab,
+            &mut recording,
+            &NullProgress,
+            &request,
+            &ProvePolicy::default(),
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let mut ledger = LedgerJournal::open(&out.path().join("evidence.jsonl")).unwrap();
+        let meta = BundleMeta {
+            analysis_id: "analysis:nfs-test".into(),
+            repository: RepositorySection {
+                canonical_url: "fixture://nfs".into(),
+                revision: "deadbeef".into(),
+                ref_requested: None,
+                source_digest: Digest::of_bytes(b"fixture"),
+                file_count: 1,
+                total_size_bytes: 1,
+            },
+            backend: BackendKind::Process,
+            packs: Vec::new(),
+        };
+
+        write_bundle(out.path(), &report, &mut ledger, &meta).unwrap();
+
+        let proof: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.path().join("proof.json")).unwrap())
+                .unwrap();
+        assert_eq!(proof["nfs_candidates"][0]["server"], "files.internal");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.path().join("ovid.json")).unwrap())
+                .unwrap();
+        let filesystem = &manifest["external_filesystems"][0];
+        assert_eq!(filesystem["export"], "/exports/models");
+        assert_eq!(filesystem["accesses"][0]["path"], "/weights/model.bin");
+        assert_eq!(filesystem["causality"], "unresolved");
+        assert!(filesystem["evidence"].as_array().unwrap().len() >= 2);
+
+        let lock: ovid_world::WorldLock = serde_yaml::from_str(
+            &std::fs::read_to_string(out.path().join("world.lock.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lock.status, WorldStatus::Proposed);
+        assert!(lock.cells.iter().any(|cell| {
+            cell.kind == "unresolved" && cell.id == "files.internal:/exports/models"
+        }));
+        assert_eq!(status_after_replay(&lock, true), WorldStatus::Proposed);
+        assert_eq!(status_after_replay(&lock, false), WorldStatus::ReplayFailed);
+    }
 }
