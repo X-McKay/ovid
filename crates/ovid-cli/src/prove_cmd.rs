@@ -27,6 +27,7 @@ use ovid_output::{
 use ovid_packs::PackRegistry;
 use ovid_planner::ActionKind;
 use ovid_world::{SuccessSpec, Treatment as WorldTreatment, World, WorldDependency, WorldStatus};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Version marker for the proof projection.
@@ -797,6 +798,29 @@ pub fn run_replay(
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok())
         .flatten();
+    let unresolved_nfs: BTreeSet<String> = proof
+        .get("conclusions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|classified| classified.get("conclusion"))
+        .filter(|conclusion| {
+            conclusion
+                .get("necessity")
+                .and_then(serde_json::Value::as_str)
+                == Some("unresolved")
+        })
+        .filter_map(|conclusion| conclusion.get("dependency"))
+        .filter(|dependency| {
+            dependency.get("kind").and_then(serde_json::Value::as_str) == Some("network-filesystem")
+        })
+        .filter_map(|dependency| {
+            dependency
+                .get("logical_identity")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_string)
+        .collect();
 
     let registry = open_registry(None)?;
     // Canonical URLs for local trees are `file://<path>`; re-acquire them
@@ -855,13 +879,14 @@ pub fn run_replay(
     })?;
 
     // Update the lock's status from the outcome — never the other way.
-    // A passing rerun cannot verify a world that still contains an
-    // unresolved cell: it merely repeated the ambient dependency.
+    // A passing rerun cannot verify an unresolved NFS cell because that
+    // merely repeats the ambient mount condition. Provider-less cells for
+    // proven-required network services preserve the pre-NFS behavior.
     let lock_path = bundle.join("world.lock.yaml");
     let mut world_verified = result.record.outcome.passed;
     if let Ok(lock_text) = std::fs::read_to_string(&lock_path) {
         if let Ok(mut lock) = serde_yaml::from_str::<ovid_world::WorldLock>(&lock_text) {
-            lock.status = status_after_replay(&lock, result.record.outcome.passed);
+            lock.status = status_after_replay(&lock, result.record.outcome.passed, &unresolved_nfs);
             world_verified = lock.status == WorldStatus::Verified;
             std::fs::write(&lock_path, lock.to_yaml())?;
         }
@@ -890,10 +915,18 @@ pub fn run_replay(
     }
 }
 
-fn status_after_replay(lock: &ovid_world::WorldLock, passed: bool) -> WorldStatus {
+fn status_after_replay(
+    lock: &ovid_world::WorldLock,
+    passed: bool,
+    unresolved_nfs: &BTreeSet<String>,
+) -> WorldStatus {
     if !passed {
         WorldStatus::ReplayFailed
-    } else if lock.cells.iter().any(|cell| cell.kind == "unresolved") {
+    } else if lock
+        .cells
+        .iter()
+        .any(|cell| cell.kind == "unresolved" && unresolved_nfs.contains(&cell.id))
+    {
         WorldStatus::Proposed
     } else {
         WorldStatus::Verified
@@ -1055,8 +1088,20 @@ mod tests {
         assert!(lock.cells.iter().any(|cell| {
             cell.kind == "unresolved" && cell.id == "files.internal:/exports/models"
         }));
-        assert_eq!(status_after_replay(&lock, true), WorldStatus::Proposed);
-        assert_eq!(status_after_replay(&lock, false), WorldStatus::ReplayFailed);
+        let unresolved_nfs = BTreeSet::from(["files.internal:/exports/models".to_string()]);
+        assert_eq!(
+            status_after_replay(&lock, true, &unresolved_nfs),
+            WorldStatus::Proposed
+        );
+        assert_eq!(
+            status_after_replay(&lock, false, &unresolved_nfs),
+            WorldStatus::ReplayFailed
+        );
+        assert_eq!(
+            status_after_replay(&lock, true, &BTreeSet::new()),
+            WorldStatus::Verified,
+            "provider-less non-NFS cells preserve the pre-NFS replay behavior"
+        );
     }
 
     #[test]
