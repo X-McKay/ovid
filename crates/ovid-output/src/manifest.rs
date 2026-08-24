@@ -31,8 +31,8 @@ pub struct Manifest {
     pub workloads: Vec<WorkloadReport>,
     #[serde(default)]
     pub external_systems: Vec<ExternalSystemReport>,
-    /// Mounted network filesystems whose files were accessed by an
-    /// executed workload. Empty in static-only analysis.
+    /// Declared or already-mounted network filesystems, plus correlated file
+    /// attempts when a workload was executed.
     #[serde(default)]
     pub external_filesystems: Vec<NetworkFilesystemReport>,
     #[serde(default)]
@@ -257,9 +257,9 @@ pub struct ExternalSystemReport {
     pub evidence: Vec<String>,
 }
 
-/// An observed mounted network filesystem. This reports identity and
+/// A declared or observed network filesystem. This reports identity and
 /// access metadata only; file contents and mount credentials are never
-/// captured.
+/// captured, and a declaration does not imply that Ovid mounted it.
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct NetworkFilesystemReport {
     pub id: String,
@@ -270,6 +270,14 @@ pub struct NetworkFilesystemReport {
     pub mount_points: Vec<String>,
     /// True only when every observed mount of this export was read-only.
     pub read_only: bool,
+    /// Deployment metadata declared this NFS mapping.
+    pub declared: bool,
+    /// The analyzed run had no such NFS export mounted.
+    pub unavailable_during_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declaration_sources: Vec<String>,
     pub accesses: Vec<NetworkFilesystemAccessReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub causality: Option<CausalClassification>,
@@ -530,17 +538,27 @@ impl Manifest {
         for filesystem in &self.external_filesystems {
             findings.push(Finding {
                 severity: "note".into(),
-                kind: "network-filesystem-observed".into(),
+                kind: if filesystem.accesses.is_empty() {
+                    "network-filesystem-declared"
+                } else {
+                    "network-filesystem-attempted"
+                }
+                .into(),
                 subject: filesystem.id.clone(),
                 detail: format!(
-                    "{} path(s) accessed through {} mount point(s); causality remains {}",
+                    "{} path(s) attempted below {} declared mount point(s); NFS was {} during the run; causality {}",
                     filesystem.accesses.len(),
                     filesystem.mount_points.len(),
+                    if filesystem.unavailable_during_run {
+                        "absent"
+                    } else {
+                        "present or unverified"
+                    },
                     match filesystem.causality {
                         Some(CausalClassification::Required) => "required",
                         Some(CausalClassification::Optional) => "optional",
-                        Some(CausalClassification::Unresolved) | None => "unresolved",
-                        Some(_) => "observed",
+                        Some(CausalClassification::Unresolved) | None => "is unresolved",
+                        Some(_) => "was observed",
                     }
                 ),
             });
@@ -746,6 +764,10 @@ mod tests {
             export: "/exports/models".into(),
             mount_points: vec!["/mnt/models".into()],
             read_only: true,
+            declared: true,
+            unavailable_during_run: true,
+            services: vec!["model-api".into()],
+            declaration_sources: vec!["compose.yaml (compose)".into()],
             accesses: vec![NetworkFilesystemAccessReport {
                 mount_point: "/mnt/models".into(),
                 path: "/weights/model.bin".into(),
@@ -769,7 +791,7 @@ mod tests {
         assert!(summary
             .findings
             .iter()
-            .any(|finding| finding.kind == "network-filesystem-observed"));
+            .any(|finding| finding.kind == "network-filesystem-attempted"));
     }
 
     #[test]

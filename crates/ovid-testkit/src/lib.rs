@@ -44,7 +44,7 @@ struct TreatmentScript {
     candidates: Vec<NetworkCandidate>,
     /// Executable candidates observed during these trials.
     executables: Vec<ExecutableCandidate>,
-    /// Mounted NFS dependencies observed during these trials.
+    /// Declared-absent or already-mounted NFS candidates for these trials.
     nfs: Vec<NfsCandidate>,
 }
 
@@ -260,7 +260,7 @@ impl LaboratoryPort for FixtureLaboratory {
             egress_intents: Vec::new(),
             executables: script.executables.clone(),
             nfs: script.nfs.clone(),
-            observed: true,
+            observed: self.capabilities.observation,
             events_captured: (script.candidates.len()
                 + script.executables.len()
                 + script
@@ -332,6 +332,10 @@ pub fn nfs_candidate(server: &str, export: &str, mount_point: &str, path: &str) 
         fs_types: vec!["nfs4".into()],
         mount_points: vec![mount_point.into()],
         read_only: true,
+        declared: false,
+        unavailable_during_trial: false,
+        services: Vec::new(),
+        declaration_sources: Vec::new(),
         accesses: vec![NfsFileAccess {
             mount_point: mount_point.into(),
             path: path.into(),
@@ -339,6 +343,39 @@ pub fn nfs_candidate(server: &str, export: &str, mount_point: &str, path: &str) 
             write_attempts: 0,
             failures: 0,
         }],
+        evidence: Vec::new(),
+    }
+}
+
+/// Convenience: a deployment-declared NFS export deliberately absent
+/// during the trial, optionally with one failed read below its mount path.
+pub fn declared_absent_nfs_candidate(
+    server: &str,
+    export: &str,
+    mount_point: &str,
+    attempted_path: Option<&str>,
+) -> NfsCandidate {
+    NfsCandidate {
+        key: ovid_domain::DependencyKey::network_filesystem(format!("{server}:{export}")),
+        server: server.to_string(),
+        export: export.to_string(),
+        fs_types: vec!["nfs4".into()],
+        mount_points: vec![mount_point.into()],
+        read_only: true,
+        declared: true,
+        unavailable_during_trial: true,
+        services: vec!["fixture-service".into()],
+        declaration_sources: vec!["fixture.yaml (compose)".into()],
+        accesses: attempted_path
+            .map(|path| NfsFileAccess {
+                mount_point: mount_point.into(),
+                path: path.into(),
+                read_attempts: 1,
+                write_attempts: 0,
+                failures: 1,
+            })
+            .into_iter()
+            .collect(),
         evidence: Vec::new(),
     }
 }

@@ -160,7 +160,9 @@ fn evidence_chain_verifies_after_inspection() {
     );
 }
 
-#[cfg(unix)]
+// Missing-executable discovery is strace-backed on the process backend.
+// macOS execution uses Microsandbox for Linux boundary observation.
+#[cfg(target_os = "linux")]
 #[test]
 fn prove_missing_tool_reports_candidate_with_resolver_hint() {
     let out = temp_out("missingtool");
@@ -435,6 +437,70 @@ fn compose_services_appear_as_declared_external_systems() {
     assert!(claims_text.contains("service:mailhog"));
     let ledger_text = std::fs::read_to_string(out.join("evidence.jsonl")).unwrap();
     assert!(ledger_text.contains("compose-service-declared"));
+}
+
+#[test]
+fn inspect_reports_declared_nfs_without_mounting_or_executing() {
+    let out = temp_out("nfs-declared-inspect");
+    let fixture = fixtures().join("nfs-declared");
+    let (ok, _, stderr) = run_ovid(&[
+        "inspect",
+        fixture.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "inspect failed: {stderr}");
+    let manifest = load_manifest(&out);
+    let filesystem = &manifest["external_filesystems"][0];
+    assert_eq!(filesystem["id"], "files.internal:/exports/models");
+    assert_eq!(filesystem["mount_points"][0], "/ovid-fixture-nfs/models");
+    assert_eq!(filesystem["declared"], true);
+    assert!(filesystem["accesses"].as_array().unwrap().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn prove_records_declared_nfs_read_attempt_without_mounting() {
+    let out = temp_out("nfs-declared-prove");
+    let fixture = fixtures().join("nfs-declared");
+    let mount_path = Path::new("/ovid-fixture-nfs/models");
+    assert!(!mount_path.exists(), "fixture path must not be mounted");
+    let output = Command::new(ovid_bin())
+        .args([
+            "prove",
+            fixture.to_str().unwrap(),
+            "--workload",
+            "test",
+            "--egress",
+            "allow",
+            "--out",
+            out.to_str().unwrap(),
+            "--timeout",
+            "120",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(20));
+    assert!(
+        !mount_path.exists(),
+        "Ovid must not create or mount the path"
+    );
+
+    let proof: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("proof.json")).unwrap()).unwrap();
+    let filesystem = &proof["nfs_candidates"][0];
+    assert_eq!(filesystem["server"], "files.internal");
+    assert_eq!(filesystem["unavailable_during_trial"], true);
+    assert_eq!(filesystem["accesses"][0]["path"], "/weights/model.bin");
+    assert!(filesystem["accesses"][0]["failures"].as_u64().unwrap() >= 1);
+    let conclusion = proof["conclusions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|classified| &classified["conclusion"])
+        .find(|conclusion| conclusion["dependency"]["kind"] == "network-filesystem")
+        .expect("NFS conclusion");
+    assert_eq!(conclusion["necessity"], "unresolved");
 }
 
 #[test]

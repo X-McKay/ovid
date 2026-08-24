@@ -16,6 +16,7 @@
 pub mod compose;
 pub mod endpoints;
 pub mod languages;
+pub mod nfs;
 pub mod purl;
 pub mod scanners;
 
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 pub use compose::{scan_compose, DeclaredService};
 pub use endpoints::{scan_endpoints, DeclaredEndpoint, EndpointOrigin};
 pub use languages::{detect_languages, LanguageStat};
+pub use nfs::{scan_declared_nfs, DeclaredNfsMount};
 pub use purl::purl;
 
 /// Dependency scope, as declared by the manifest.

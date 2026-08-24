@@ -17,7 +17,7 @@
 use crate::ports::{
     merge_candidates, merge_executables, merge_nfs_candidates, EgressIntent, ExecutableCandidate,
     JournalError, JournalEvent, JournalPort, LabError, LaboratoryPort, NetworkCandidate,
-    NfsCandidate, ProgressPort, TrialResult, TrialSpec,
+    NfsCandidate, NfsDeclaration, ProgressPort, TrialResult, TrialSpec,
 };
 use crate::workflow::{AnalysisState, Workflow};
 use ovid_domain::{
@@ -75,6 +75,9 @@ pub struct ProveRequest {
     pub scope: AnalysisScope,
     /// Provisioning command (dependency install), when discovered.
     pub provision_argv: Option<Vec<String>>,
+    /// Static deployment declarations used for an absent-mount probe.
+    /// Laboratories receive the same declarations but never mount them.
+    pub nfs_declarations: Vec<NfsDeclaration>,
 }
 
 /// One classified dependency with its journal evidence id.
@@ -108,9 +111,9 @@ pub struct ProveReport {
     pub egress_intents: Vec<EgressIntent>,
     /// Environment-provided executables observed during baseline (merged).
     pub executable_candidates: Vec<ExecutableCandidate>,
-    /// Mounted NFS server/exports and per-file operations observed during
-    /// baseline. These remain causally unresolved until an enforced mount
-    /// treatment is available.
+    /// Declared or already-mounted NFS server/exports and per-file operations
+    /// observed during baseline. A stable pass while a declared export is
+    /// absent proves it optional; other cases remain unresolved.
     pub nfs_candidates: Vec<NfsCandidate>,
     pub trials: Vec<TrialRecord>,
     pub conclusions: Vec<ClassifiedDependency>,
@@ -118,6 +121,8 @@ pub struct ProveReport {
     pub limitations: Vec<String>,
     pub timings: Vec<StageTiming>,
     pub trials_executed: usize,
+    /// Boundary events retained by observers across every executed trial.
+    pub events_captured: u64,
 }
 
 /// Failures of the prove loop itself (trial *outcomes* are results, not
@@ -254,6 +259,7 @@ pub fn prove(
     let mut timings: Vec<StageTiming> = Vec::new();
     let mut trials: Vec<TrialRecord> = Vec::new();
     let mut trials_executed = 0usize;
+    let mut events_captured = 0u64;
 
     // Source resolution and workload selection happened upstream (the
     // scope carries the exact revision and argv); record them.
@@ -263,6 +269,13 @@ pub fn prove(
         workload: scope.workload.clone(),
         argv: scope.workload_argv.clone(),
     })?;
+    let nfs_declaration_evidence = if request.nfs_declarations.is_empty() {
+        None
+    } else {
+        Some(journal.append(&JournalEvent::NfsDeclared {
+            filesystems: request.nfs_declarations.clone(),
+        })?)
+    };
 
     // ---------------------------------------------------- environment
     let stage_start = Instant::now();
@@ -307,6 +320,7 @@ pub fn prove(
                      journal: &mut dyn JournalPort,
                      trials: &mut Vec<TrialRecord>,
                      trials_executed: &mut usize,
+                     events_captured: &mut u64,
                      label: String,
                      treatment: Treatment|
      -> Result<Option<TrialResult>, ProveError> {
@@ -323,6 +337,7 @@ pub fn prove(
             },
         )?;
         *trials_executed += 1;
+        *events_captured += result.observations.events_captured;
         journal.append(&JournalEvent::TrialCompleted {
             record: result.record.clone(),
             exit_code: result.exit_code,
@@ -335,12 +350,24 @@ pub fn prove(
                 intents: result.observations.egress_intents.clone(),
             })?;
         }
-        if !result.observations.nfs.is_empty() {
+        let accessed: Vec<NfsCandidate> = result
+            .observations
+            .nfs
+            .iter()
+            .filter(|filesystem| !filesystem.accesses.is_empty())
+            .cloned()
+            .collect();
+        if !accessed.is_empty() {
             let evidence = journal.append(&JournalEvent::NfsAccessObserved {
                 trial: result.record.label.clone(),
-                filesystems: result.observations.nfs.clone(),
+                filesystems: accessed,
             })?;
-            for filesystem in &mut result.observations.nfs {
+            for filesystem in result
+                .observations
+                .nfs
+                .iter_mut()
+                .filter(|filesystem| !filesystem.accesses.is_empty())
+            {
                 filesystem.evidence.push(evidence.clone());
             }
         }
@@ -364,6 +391,7 @@ pub fn prove(
             journal,
             &mut trials,
             &mut trials_executed,
+            &mut events_captured,
             format!("baseline-{index}"),
             Treatment::None,
         )? {
@@ -379,6 +407,18 @@ pub fn prove(
         .map(|r| r.record.outcome.clone())
         .collect();
     let baseline = assess_baseline(&baseline_outcomes);
+    if !request.nfs_declarations.is_empty()
+        && baseline_results
+            .iter()
+            .any(|result| !result.observations.observed)
+    {
+        limitations.push(
+            "declared NFS exports were absent, but boundary observation was unavailable in at \
+             least one baseline run; attempted file paths are incomplete (the Microsandbox \
+             guest image must include strace)"
+                .into(),
+        );
+    }
     journal.append(&JournalEvent::BaselineClassified {
         verdict: baseline.clone(),
     })?;
@@ -410,7 +450,18 @@ pub fn prove(
         .filter(|c| c.externally_controlled)
         .collect();
     let executable_candidates: Vec<ExecutableCandidate> = merge_executables(&baseline_observations);
-    let nfs_candidates: Vec<NfsCandidate> = merge_nfs_candidates(&baseline_observations);
+    let mut nfs_candidates: Vec<NfsCandidate> = merge_nfs_candidates(&baseline_observations);
+    if let Some(evidence) = nfs_declaration_evidence {
+        for candidate in nfs_candidates
+            .iter_mut()
+            .filter(|candidate| candidate.declared)
+        {
+            if !candidate.evidence.contains(&evidence) {
+                candidate.evidence.push(evidence.clone());
+                candidate.evidence.sort();
+            }
+        }
+    }
     // Named egress intents from the baseline posture — what the workload
     // tried to reach — deduplicated for the report.
     let mut egress_intents: Vec<EgressIntent> = Vec::new();
@@ -456,7 +507,7 @@ pub fn prove(
         key: candidate.key.clone(),
         externally_controlled: true,
         unavailable_under_treatment: false,
-        attempted_in_baseline: true,
+        attempted_in_baseline: !candidate.accesses.is_empty(),
     };
 
     if !baseline.supports_experiments() {
@@ -478,15 +529,41 @@ pub fn prove(
             classify_intervention(&baseline, &[], &evidence),
         )?;
     } else {
-        if !nfs_candidates.is_empty() {
+        // The no-mount Microsandbox baseline is itself a natural
+        // counterfactual. If it passes, every declared NFS export that was
+        // absent is optional for this workload scope—even when the code
+        // probed paths below it. No server was contacted and no folder was
+        // mounted. Existing mounts, however, still need a controlled
+        // removal treatment and remain unresolved.
+        let absent_nfs: Vec<CandidateEvidence> = nfs_candidates
+            .iter()
+            .filter(|candidate| candidate.unavailable_during_trial)
+            .map(nfs_evidence)
+            .map(|mut evidence| {
+                evidence.unavailable_under_treatment = true;
+                evidence
+            })
+            .collect();
+        if !absent_nfs.is_empty() {
+            journal_conclusions(
+                journal,
+                &mut conclusions,
+                classify_natural_counterfactual(&baseline, &baseline_labels, &absent_nfs),
+            )?;
+        }
+        let untreated_nfs: Vec<&NfsCandidate> = nfs_candidates
+            .iter()
+            .filter(|candidate| !candidate.unavailable_during_trial)
+            .collect();
+        if !untreated_nfs.is_empty() {
             limitations.push(format!(
                 "{} NFS server/export dependency candidate(s) were observed, but this \
                  laboratory cannot enforce per-mount removal or replacement; they remain \
                  unresolved",
-                nfs_candidates.len()
+                untreated_nfs.len()
             ));
             let evidence: Vec<CandidateEvidence> =
-                nfs_candidates.iter().map(nfs_evidence).collect();
+                untreated_nfs.into_iter().map(nfs_evidence).collect();
             journal_conclusions(
                 journal,
                 &mut conclusions,
@@ -578,6 +655,7 @@ pub fn prove(
                         journal,
                         &mut trials,
                         &mut trials_executed,
+                        &mut events_captured,
                         format!("no-egress-{index}"),
                         treatment.clone(),
                     )? {
@@ -652,6 +730,7 @@ pub fn prove(
                                 journal,
                                 &mut trials,
                                 &mut trials_executed,
+                                &mut events_captured,
                                 format!("block-{}-{index}", candidate.key.logical_identity),
                                 treatment.clone(),
                             )? {
@@ -765,6 +844,7 @@ pub fn prove(
                             journal,
                             &mut trials,
                             &mut trials_executed,
+                            &mut events_captured,
                             format!("hide-{}-{index}", exe.name),
                             treatment.clone(),
                         ) {
@@ -884,6 +964,7 @@ pub fn prove(
                 journal,
                 &mut trials,
                 &mut trials_executed,
+                &mut events_captured,
                 "replay".into(),
                 Treatment::None,
             )?
@@ -937,5 +1018,6 @@ pub fn prove(
         limitations,
         timings,
         trials_executed,
+        events_captured,
     })
 }

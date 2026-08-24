@@ -1,0 +1,13 @@
+services:
+  model-api:
+    image: example/model-api:test
+    volumes:
+      - models:/ovid-fixture-nfs/models:ro
+
+volumes:
+  models:
+    driver: local
+    driver_opts:
+      type: nfs4
+      o: addr=files.internal,ro,nfsvers=4
+      device: :/exports/models

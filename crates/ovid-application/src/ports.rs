@@ -144,6 +144,22 @@ pub struct NfsFileAccess {
     pub failures: u64,
 }
 
+/// Repository-declared NFS mapping supplied to the laboratory. The lab
+/// does not mount it; this is a path/identity map for an absent-mount probe.
+#[derive(Clone, PartialEq, Eq, Serialize, Debug)]
+pub struct NfsDeclaration {
+    pub key: DependencyKey,
+    pub server: String,
+    pub export: String,
+    pub fs_type: String,
+    pub mount_point: String,
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub source_file: String,
+    pub source_kind: String,
+}
+
 /// An NFS server/export observed through file access during a trial.
 #[derive(Clone, PartialEq, Eq, Serialize, Debug)]
 pub struct NfsCandidate {
@@ -156,6 +172,17 @@ pub struct NfsCandidate {
     pub mount_points: Vec<String>,
     /// True only when every observed mount of the export was read-only.
     pub read_only: bool,
+    /// Repository deployment metadata declared this mapping.
+    pub declared: bool,
+    /// The trial ran without this NFS export mounted. Microsandbox makes
+    /// this true by construction because Ovid forwards only the workspace.
+    pub unavailable_during_trial: bool,
+    /// Services/containers that declare this mapping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
+    /// Repository declaration files supporting this candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declaration_sources: Vec<String>,
     /// Deduplicated per-file access records.
     pub accesses: Vec<NfsFileAccess>,
     /// Ledger ids of `nfs-access-observed` records supporting this entry.
@@ -299,9 +326,14 @@ pub enum JournalEvent {
         trial: String,
         intents: Vec<EgressIntent>,
     },
-    /// File operations attributed to mounted NFS server/exports. This is
-    /// observation evidence only; causal necessity remains unresolved until
-    /// an enforced mount treatment is available.
+    /// Static deployment declarations for an NFS mapping. This is T4
+    /// repository evidence and does not imply that a mount was present.
+    NfsDeclared {
+        filesystems: Vec<NfsDeclaration>,
+    },
+    /// File operations attributed to declared NFS paths or already-mounted
+    /// server/exports. This is observation evidence; causal necessity comes
+    /// from the surrounding passing/failing no-mount condition.
     NfsAccessObserved {
         trial: String,
         filesystems: Vec<NfsCandidate>,
@@ -389,6 +421,18 @@ pub fn merge_nfs_candidates(trials: &[&TrialObservations]) -> Vec<NfsCandidate> 
                 .entry(candidate.key.clone())
                 .and_modify(|existing| {
                     existing.read_only &= candidate.read_only;
+                    existing.declared |= candidate.declared;
+                    existing.unavailable_during_trial &= candidate.unavailable_during_trial;
+                    for service in &candidate.services {
+                        if !existing.services.contains(service) {
+                            existing.services.push(service.clone());
+                        }
+                    }
+                    for source in &candidate.declaration_sources {
+                        if !existing.declaration_sources.contains(source) {
+                            existing.declaration_sources.push(source.clone());
+                        }
+                    }
                     for fs_type in &candidate.fs_types {
                         if !existing.fs_types.contains(fs_type) {
                             existing.fs_types.push(fs_type.clone());
@@ -423,6 +467,8 @@ pub fn merge_nfs_candidates(trials: &[&TrialObservations]) -> Vec<NfsCandidate> 
     for candidate in merged.values_mut() {
         candidate.fs_types.sort();
         candidate.mount_points.sort();
+        candidate.services.sort();
+        candidate.declaration_sources.sort();
         candidate.evidence.sort();
         candidate
             .accesses
@@ -519,6 +565,10 @@ mod tests {
             fs_types: vec!["nfs4".into()],
             mount_points: vec![mount.into()],
             read_only,
+            declared: true,
+            unavailable_during_trial: true,
+            services: vec!["model-api".into()],
+            declaration_sources: vec!["compose.yaml".into()],
             accesses: vec![NfsFileAccess {
                 mount_point: mount.into(),
                 path: "/model.bin".into(),

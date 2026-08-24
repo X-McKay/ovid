@@ -54,7 +54,7 @@ pub fn integration_plan_markdown(manifest: &Manifest, lock: Option<&WorldLock>) 
     }
 
     if !manifest.external_filesystems.is_empty() {
-        out.push_str("## Mounted network filesystems\n\n");
+        out.push_str("## Network filesystem dependencies\n\n");
         out.push_str("| Dependency | Protocol | Mounts | Paths | Causality |\n");
         out.push_str("|---|---|---|---|---|\n");
         for filesystem in &manifest.external_filesystems {

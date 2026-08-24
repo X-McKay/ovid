@@ -2,11 +2,15 @@
 //! ground truth in a scripted laboratory, asserted end to end through the
 //! use case — the acceptance scenario of migration Phase 0.
 
-use ovid_application::{prove, JournalEvent, NullProgress, ProveError, ProvePolicy, ProveRequest};
-use ovid_domain::{AnalysisScope, DependencyKind, Necessity, TrialOutcome, WorldOutcome};
+use ovid_application::{
+    prove, JournalEvent, NfsDeclaration, NullProgress, ProveError, ProvePolicy, ProveRequest,
+};
+use ovid_domain::{
+    AnalysisScope, DependencyKey, DependencyKind, Necessity, TrialOutcome, WorldOutcome,
+};
 use ovid_testkit::{
-    executable_candidate, external_candidate, gateway_refused_candidate, nfs_candidate,
-    FixtureLaboratory, RecordingJournal,
+    declared_absent_nfs_candidate, executable_candidate, external_candidate,
+    gateway_refused_candidate, nfs_candidate, FixtureLaboratory, RecordingJournal,
 };
 
 fn request() -> ProveRequest {
@@ -21,6 +25,7 @@ fn request() -> ProveRequest {
             ..Default::default()
         },
         provision_argv: Some(vec!["make".into(), "deps".into()]),
+        nfs_declarations: Vec::new(),
     }
 }
 
@@ -119,6 +124,129 @@ fn observed_nfs_access_is_evidenced_but_remains_unresolved() -> Result<(), Prove
         !lab.trials_run.iter().any(|label| label == "replay"),
         "repeating the same live mount is not world verification"
     );
+    Ok(())
+}
+
+#[test]
+fn passing_without_declared_nfs_proves_it_optional_without_mounting() -> Result<(), ProveError> {
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_nfs(vec![declared_absent_nfs_candidate(
+            "files.internal",
+            "/exports/models",
+            "/srv/models",
+            Some("/weights/model.bin"),
+        )]);
+    let mut journal = RecordingJournal::default();
+    let mut request = request();
+    request.nfs_declarations.push(NfsDeclaration {
+        key: DependencyKey::network_filesystem("files.internal:/exports/models"),
+        server: "files.internal".into(),
+        export: "/exports/models".into(),
+        fs_type: "nfs4".into(),
+        mount_point: "/srv/models".into(),
+        read_only: true,
+        service: Some("fixture-service".into()),
+        source_file: "fixture.yaml".into(),
+        source_kind: "compose".into(),
+    });
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request, &policy())?;
+
+    let classified = report
+        .conclusions
+        .iter()
+        .find(|classified| {
+            classified.conclusion.dependency().kind == DependencyKind::NetworkFilesystem
+        })
+        .expect("NFS conclusion");
+    assert_eq!(classified.conclusion.necessity(), Necessity::Optional);
+    assert!(classified
+        .conclusion
+        .reason()
+        .contains("natural counterfactual"));
+    assert_eq!(report.nfs_candidates[0].accesses[0].failures, 2);
+    assert!(journal
+        .events
+        .iter()
+        .any(|event| matches!(event, JournalEvent::NfsDeclared { .. })));
+    assert!(report.nfs_candidates[0].evidence.len() >= 3);
+    assert!(matches!(report.world, WorldOutcome::Verified { .. }));
+    Ok(())
+}
+
+#[test]
+fn absent_nfs_without_boundary_observer_reports_unknown_attempt_paths() -> Result<(), ProveError> {
+    let mut lab = FixtureLaboratory::new()
+        .with_capabilities(ovid_application::LabCapabilities {
+            clean_snapshot_restore: true,
+            observation: false,
+            ..Default::default()
+        })
+        .with_baseline_outcomes(vec![TrialOutcome::passed()])
+        .with_baseline_nfs(vec![declared_absent_nfs_candidate(
+            "files.internal",
+            "/exports/models",
+            "/srv/models",
+            None,
+        )]);
+    let mut journal = RecordingJournal::default();
+    let mut request = request();
+    request.nfs_declarations.push(NfsDeclaration {
+        key: DependencyKey::network_filesystem("files.internal:/exports/models"),
+        server: "files.internal".into(),
+        export: "/exports/models".into(),
+        fs_type: "nfs4".into(),
+        mount_point: "/srv/models".into(),
+        read_only: true,
+        service: Some("fixture-service".into()),
+        source_file: "fixture.yaml".into(),
+        source_kind: "compose".into(),
+    });
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request, &policy())?;
+
+    let classified = report
+        .conclusions
+        .iter()
+        .find(|classified| {
+            classified.conclusion.dependency().kind == DependencyKind::NetworkFilesystem
+        })
+        .expect("NFS conclusion");
+    assert_eq!(classified.conclusion.necessity(), Necessity::Optional);
+    assert!(report.nfs_candidates[0].accesses.is_empty());
+    assert!(report
+        .limitations
+        .iter()
+        .any(|limitation| limitation.contains("guest image must include strace")));
+    Ok(())
+}
+
+#[test]
+fn failing_no_mount_probe_reports_attempt_but_cannot_claim_required() -> Result<(), ProveError> {
+    let mut lab = FixtureLaboratory::new()
+        .with_baseline_outcomes(vec![TrialOutcome::failed("missing model")])
+        .with_baseline_nfs(vec![declared_absent_nfs_candidate(
+            "files.internal",
+            "/exports/models",
+            "/srv/models",
+            Some("/weights/model.bin"),
+        )]);
+    let mut journal = RecordingJournal::default();
+    let report = prove(&mut lab, &mut journal, &NullProgress, &request(), &policy())?;
+
+    let classified = report
+        .conclusions
+        .iter()
+        .find(|classified| {
+            classified.conclusion.dependency().kind == DependencyKind::NetworkFilesystem
+        })
+        .expect("NFS conclusion");
+    assert_eq!(classified.conclusion.necessity(), Necessity::Unresolved);
+    assert!(classified.conclusion.reason().contains("baseline"));
+    assert_eq!(
+        report.nfs_candidates[0].accesses[0].path,
+        "/weights/model.bin"
+    );
+    assert!(matches!(report.world, WorldOutcome::NotSynthesized { .. }));
     Ok(())
 }
 

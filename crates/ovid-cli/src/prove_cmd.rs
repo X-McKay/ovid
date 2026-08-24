@@ -14,8 +14,8 @@ use crate::inspect_cmd::{acquire_snapshot, repository_section};
 use crate::lab::{BackendKind, HostLaboratory};
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use ovid_application::{
-    prove, run_clean_replay, JournalError, JournalEvent, JournalPort, LaboratoryPort, ProgressPort,
-    ProvePolicy, ProveReport, ProveRequest,
+    prove, run_clean_replay, JournalError, JournalEvent, JournalPort, LaboratoryPort,
+    NfsDeclaration, ProgressPort, ProvePolicy, ProveReport, ProveRequest,
 };
 use ovid_core::{CausalClassification, Digest, IdGenerator, OvidId, TrustTier};
 use ovid_domain::{AnalysisScope, DependencyKind, Necessity, WorldOutcome};
@@ -82,8 +82,9 @@ impl LedgerJournal {
             // Gateway-observed egress intents are directly enforced by a
             // trusted lab component (T1), not merely tool-derived.
             JournalEvent::EgressObserved { .. } => TrustTier::T1,
-            // Kernel-observed file operations correlated with the host's
-            // mount table. Strong observation, but not an intervention.
+            // Kernel-observed file operations correlated with either a
+            // declared no-mount path or an already-visible mount table.
+            // Strong observation, but not itself an intervention.
             JournalEvent::NfsAccessObserved { .. } => TrustTier::T2,
             _ => TrustTier::T4,
         }
@@ -160,6 +161,23 @@ fn open_registry(packs_dir: Option<&Path>) -> Result<PackRegistry> {
     Ok(registry)
 }
 
+fn declared_nfs(snapshot: &ovid_repository::RepoSnapshot) -> Vec<NfsDeclaration> {
+    ovid_inventory::scan_declared_nfs(snapshot)
+        .into_iter()
+        .map(|declaration| NfsDeclaration {
+            key: ovid_domain::DependencyKey::network_filesystem(declaration.identity()),
+            server: declaration.server,
+            export: declaration.export,
+            fs_type: declaration.fs_type,
+            mount_point: declaration.mount_point,
+            read_only: declaration.read_only,
+            service: declaration.service,
+            source_file: declaration.source_file,
+            source_kind: declaration.source_kind,
+        })
+        .collect()
+}
+
 /// Run `ovid prove`. Returns the process exit code (proposal §16.2):
 /// 0 = completed, 20 = workload/baseline failed or replay failed.
 pub fn run_prove(
@@ -218,6 +236,7 @@ pub fn run_prove(
         .first()
         .map(|a| a.command.clone())
         .filter(|argv| *argv != workload_argv);
+    let nfs_declarations = declared_nfs(&snapshot);
 
     let policy = ProvePolicy {
         baseline_runs: options.baseline_runs,
@@ -258,6 +277,7 @@ pub fn run_prove(
         &out_dir.join(".lab"),
         &options.extra_env,
         options.egress,
+        nfs_declarations.clone(),
         registry,
     )
     .map_err(|e| anyhow!("{e}\nRun `ovid doctor` for host capability diagnostics."))?;
@@ -272,6 +292,7 @@ pub fn run_prove(
     let request = ProveRequest {
         scope,
         provision_argv,
+        nfs_declarations,
     };
     let report = prove(&mut lab, &mut journal, &TerminalProgress, &request, &policy)
         .map_err(|e| anyhow!("prove failed: {e}"))?;
@@ -338,6 +359,7 @@ fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
         report.trials.iter().filter(|t| t.outcome.passed).count() as u32;
     manifest.analysis.runs.failed =
         report.trials.iter().filter(|t| !t.outcome.passed).count() as u32;
+    manifest.completeness.events_captured = report.events_captured;
 
     if let Some(argv) = &report.provision_argv {
         manifest.build.commands.push(argv.clone());
@@ -408,9 +430,9 @@ fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
         });
     }
 
-    // NFS accesses -> mounted external filesystems. Observation proves
-    // use, not causal necessity, so these remain unresolved until the lab
-    // can enforce mount removal or replacement.
+    // NFS declarations/accesses -> external filesystems. A passing trial
+    // with the export absent proves optionality; live-mount observation and
+    // failing no-mount trials remain unresolved.
     for candidate in &report.nfs_candidates {
         let identity = &candidate.key.logical_identity;
         let classified = conclusion_for(DependencyKind::NetworkFilesystem, identity);
@@ -427,6 +449,10 @@ fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
             export: candidate.export.clone(),
             mount_points: candidate.mount_points.clone(),
             read_only: candidate.read_only,
+            declared: candidate.declared,
+            unavailable_during_run: candidate.unavailable_during_trial,
+            services: candidate.services.clone(),
+            declaration_sources: candidate.declaration_sources.clone(),
             accesses: candidate
                 .accesses
                 .iter()
@@ -496,7 +522,12 @@ fn manifest_from_report(report: &ProveReport, meta: &BundleMeta) -> Manifest {
         } else if classified.conclusion.dependency().kind == DependencyKind::NetworkFilesystem {
             manifest.world.dependencies.push(WorldDependencySummary {
                 id: classified.conclusion.dependency().describe(),
-                treatment: "unresolved".into(),
+                treatment: match classified.conclusion.necessity() {
+                    Necessity::Optional => "absent",
+                    Necessity::Unresolved => "unresolved",
+                    Necessity::Required => unreachable!("handled above"),
+                }
+                .into(),
             });
         }
     }
@@ -792,6 +823,7 @@ pub fn run_replay(
         &bundle.join(".lab"),
         extra_env,
         egress,
+        declared_nfs(&snapshot),
         registry,
     )
     .map_err(|e| anyhow!("{e}"))?;
@@ -948,7 +980,9 @@ mod tests {
     use super::*;
     use ovid_application::NullProgress;
     use ovid_domain::TrialOutcome;
-    use ovid_testkit::{nfs_candidate, FixtureLaboratory, RecordingJournal};
+    use ovid_testkit::{
+        declared_absent_nfs_candidate, nfs_candidate, FixtureLaboratory, RecordingJournal,
+    };
 
     #[test]
     fn nfs_evidence_reaches_proof_manifest_and_proposed_world_lock() {
@@ -963,6 +997,7 @@ mod tests {
                 ..Default::default()
             },
             provision_argv: None,
+            nfs_declarations: Vec::new(),
         };
         let mut lab = FixtureLaboratory::new()
             .with_baseline_outcomes(vec![TrialOutcome::passed()])
@@ -1022,5 +1057,96 @@ mod tests {
         }));
         assert_eq!(status_after_replay(&lock, true), WorldStatus::Proposed);
         assert_eq!(status_after_replay(&lock, false), WorldStatus::ReplayFailed);
+    }
+
+    #[test]
+    fn no_mount_passing_run_projects_optional_nfs_and_an_absent_world_cell() {
+        let declaration = NfsDeclaration {
+            key: ovid_domain::DependencyKey::network_filesystem("files.internal:/exports/models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_type: "nfs4".into(),
+            mount_point: "/srv/models".into(),
+            read_only: true,
+            service: Some("model-api".into()),
+            source_file: "compose.yaml".into(),
+            source_kind: "compose".into(),
+        };
+        let request = ProveRequest {
+            scope: AnalysisScope {
+                repository: "fixture://nfs".into(),
+                revision: "deadbeef".into(),
+                workload: "read-model".into(),
+                workload_argv: vec!["read-model".into()],
+                success_predicate: "exit-code == 0".into(),
+                execution_policy: "fixture".into(),
+                ..Default::default()
+            },
+            provision_argv: None,
+            nfs_declarations: vec![declaration],
+        };
+        let mut lab = FixtureLaboratory::new()
+            .with_baseline_outcomes(vec![TrialOutcome::passed()])
+            .with_baseline_nfs(vec![declared_absent_nfs_candidate(
+                "files.internal",
+                "/exports/models",
+                "/srv/models",
+                Some("/weights/model.bin"),
+            )]);
+        let mut recording = RecordingJournal::default();
+        let report = prove(
+            &mut lab,
+            &mut recording,
+            &NullProgress,
+            &request,
+            &ProvePolicy::default(),
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let mut ledger = LedgerJournal::open(&out.path().join("evidence.jsonl")).unwrap();
+        let meta = BundleMeta {
+            analysis_id: "analysis:nfs-absent".into(),
+            repository: RepositorySection {
+                canonical_url: "fixture://nfs".into(),
+                revision: "deadbeef".into(),
+                ref_requested: None,
+                source_digest: Digest::of_bytes(b"fixture"),
+                file_count: 1,
+                total_size_bytes: 1,
+            },
+            backend: BackendKind::Microsandbox,
+            packs: Vec::new(),
+        };
+
+        write_bundle(out.path(), &report, &mut ledger, &meta).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.path().join("ovid.json")).unwrap())
+                .unwrap();
+        let filesystem = &manifest["external_filesystems"][0];
+        assert_eq!(filesystem["causality"], "optional");
+        assert_eq!(filesystem["unavailable_during_run"], true);
+        assert_eq!(filesystem["accesses"][0]["path"], "/weights/model.bin");
+        let world_dependency = manifest["world"]["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|dependency| {
+                dependency["id"] == "network-filesystem:files.internal:/exports/models"
+            })
+            .expect("NFS world summary");
+        assert_eq!(world_dependency["treatment"], "absent");
+
+        let lock: ovid_world::WorldLock = serde_yaml::from_str(
+            &std::fs::read_to_string(out.path().join("world.lock.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lock.status, WorldStatus::Verified);
+        assert!(
+            lock.cells
+                .iter()
+                .all(|cell| cell.id != "files.internal:/exports/models"),
+            "an optional absent NFS export must not become a replay dependency"
+        );
     }
 }
