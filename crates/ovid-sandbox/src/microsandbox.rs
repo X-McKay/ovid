@@ -9,9 +9,9 @@
 //! Contract with `msb run` (grounded against the upstream CLI):
 //!
 //! ```text
-//! msb run <image> --no-tty --quiet --pull if-missing --name <run-name>
-//!         --volume <workspace>:/workspace --workdir /workspace
-//!         --env K=V… --max-duration <secs>s [--no-net] -- <argv…>
+//! msb run --no-tty --name <run-name> --mkdir /workspace
+//!         --mount-dir <workspace>:/workspace --workdir /workspace
+//!         --env K=V… [--no-net] <image> -- <argv…>
 //! ```
 //!
 //! `--no-net` is a true default-deny for the guest (no egress rules), so
@@ -36,9 +36,8 @@ const GUEST_WORKSPACE: &str = "/workspace";
 /// Guest-side trace path; lands in the mounted workspace so the host can
 /// parse it after the run.
 const GUEST_TRACE: &str = "/workspace/.ovid-trace";
-/// Grace period past the guest's own `--max-duration` before the host
-/// kills the `msb` process itself (covers boot/pull overhead and a hung
-/// VMM).
+/// Host-side allowance beyond the workload deadline for image pull and VM
+/// boot before Ovid kills a hung `msb` process.
 const HOST_KILL_GRACE: Duration = Duration::from_secs(90);
 
 /// Locate the `msb` binary: `OVID_MSB_BIN` override, else `msb` on PATH.
@@ -102,12 +101,9 @@ impl MicrosandboxBackend {
             Command::new(&self.msb)
                 .args([
                     "run",
-                    &self.image,
                     "--no-tty",
-                    "--quiet",
-                    "--pull",
-                    "if-missing",
                     "--no-net",
+                    &self.image,
                     "--",
                     "sh",
                     "-lc",
@@ -132,19 +128,17 @@ impl MicrosandboxBackend {
         let mut argv: Vec<String> = vec![
             self.msb.display().to_string(),
             "run".into(),
-            self.image.clone(),
             "--no-tty".into(),
-            "--quiet".into(),
-            "--pull".into(),
-            "if-missing".into(),
             "--name".into(),
             run_name.into(),
-            "--volume".into(),
+            // Minimal images do not necessarily contain the mount target.
+            // Current msb requires directory destinations to exist.
+            "--mkdir".into(),
+            GUEST_WORKSPACE.into(),
+            "--mount-dir".into(),
             format!("{}:{GUEST_WORKSPACE}", workspace.display()),
             "--workdir".into(),
             GUEST_WORKSPACE.into(),
-            "--max-duration".into(),
-            format!("{}s", spec.limits.wall_time.as_secs().max(1)),
         ];
         // Guest base environment mirrors the process backend's scrubbed
         // base: writable HOME/TMPDIR inside the workspace, stable locale.
@@ -177,6 +171,10 @@ impl MicrosandboxBackend {
             // keeps working, exactly the §20 counterfactual posture.
             argv.push("--no-net".into());
         }
+        // Current microsandbox pulls a missing image automatically. The
+        // host watchdog below owns the end-to-end deadline (including image
+        // pull and VM boot), so no version-specific CLI timeout is needed.
+        argv.push(self.image.clone());
         argv.push("--".into());
         let inner = if wrap_observation {
             StraceObserver.wrap(&spec.argv, Path::new(GUEST_TRACE))
@@ -217,6 +215,13 @@ impl ExecutionBackend for MicrosandboxBackend {
         let trace_host = workspace.join(".ovid-trace");
         let _ = std::fs::remove_file(&trace_host);
 
+        // On macOS, tempfile paths commonly begin with `/var`, which is a
+        // symlink to `/private/var`. msb's explicit directory mount requires
+        // the resolved source path and otherwise reports ENOTDIR.
+        let mount_source = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.clone());
+
         let observing = spec.observe && self.guest_has_strace();
         let run_name = format!(
             "ovid-{}-{}",
@@ -224,7 +229,7 @@ impl ExecutionBackend for MicrosandboxBackend {
             self.run_counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let argv = self.compose_run_argv(spec, &workspace, &run_name, observing);
+        let argv = self.compose_run_argv(spec, &mount_source, &run_name, observing);
 
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
@@ -239,8 +244,9 @@ impl ExecutionBackend for MicrosandboxBackend {
         let stdout_handle = child.stdout.take().map(spawn_reader);
         let stderr_handle = child.stderr.take().map(spawn_reader);
 
-        // The guest enforces --max-duration; the host bounds the whole
-        // msb invocation (boot + pull + run) as a backstop.
+        // Bound the whole msb invocation, including boot and a first image
+        // pull. This remains effective across CLI versions because Ovid
+        // supervises the host process directly.
         let host_deadline = spec.limits.wall_time + HOST_KILL_GRACE;
         let mut timed_out = false;
         let status = loop {
@@ -353,12 +359,20 @@ mod tests {
         let spec = spec(&["make", "test"], NetworkMode::Inherit);
         let argv = backend.compose_run_argv(&spec, Path::new("/tmp/ws"), "ovid-1-0", false);
         let joined = argv.join(" ");
-        assert!(joined.starts_with("msb run ubuntu --no-tty --quiet --pull if-missing"));
-        assert!(joined.contains("--volume /tmp/ws:/workspace"));
+        assert!(joined.starts_with("msb run --no-tty --name ovid-1-0"));
+        assert!(joined.contains("--mkdir /workspace"));
+        assert!(joined.contains("--mount-dir /tmp/ws:/workspace"));
         assert!(joined.contains("--workdir /workspace"));
         assert!(joined.contains("--env HOME=/workspace/.home"));
         assert!(joined.contains("--env CI=1"));
-        assert!(joined.ends_with("-- make test"));
+        assert!(joined.ends_with("ubuntu -- make test"));
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| *argument == "--mount-dir")
+                .count(),
+            1,
+            "only the disposable workspace is exposed; no declared NFS path is mounted"
+        );
         assert!(
             !joined.contains("--no-net"),
             "inherit mode leaves default egress"
@@ -418,8 +432,10 @@ mod tests {
     }
 
     /// End-to-end run, exercised only where an `msb` CLI and hypervisor
-    /// exist (CI and this development sandbox have neither).
+    /// exist. Kept ignored in the hermetic default suite because msb writes
+    /// its host image/runtime store and may pull an image.
     #[test]
+    #[ignore = "requires a writable Microsandbox host store and guest image"]
     fn real_guest_run_when_available() {
         if !microsandbox_available() {
             eprintln!("msb unavailable; skipping guest-run integration test");

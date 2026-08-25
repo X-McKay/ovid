@@ -20,6 +20,8 @@ pub enum DependencyKind {
     SharedLibrary,
     /// A plain file or fixture.
     File,
+    /// A mounted network filesystem (for example an NFS server/export).
+    NetworkFilesystem,
     /// An environment variable the workload reads.
     EnvironmentVariable,
     /// An external network service (host:port identity).
@@ -60,6 +62,14 @@ impl DependencyKey {
         }
     }
 
+    /// A mounted network-filesystem dependency keyed by `server:/export`.
+    pub fn network_filesystem(identity: impl Into<String>) -> DependencyKey {
+        DependencyKey {
+            kind: DependencyKind::NetworkFilesystem,
+            logical_identity: identity.into(),
+        }
+    }
+
     /// An environment-variable dependency keyed by variable name.
     pub fn env_var(name: impl Into<String>) -> DependencyKey {
         DependencyKey {
@@ -75,6 +85,7 @@ impl DependencyKey {
             DependencyKind::Executable => "executable",
             DependencyKind::SharedLibrary => "shared-library",
             DependencyKind::File => "file",
+            DependencyKind::NetworkFilesystem => "network-filesystem",
             DependencyKind::EnvironmentVariable => "env",
             DependencyKind::NetworkService => "service",
             DependencyKind::UnixSocket => "unix-socket",
@@ -97,5 +108,8 @@ mod tests {
         assert_ne!(service, tool);
         assert_eq!(service.describe(), "service:redis:6379");
         assert_eq!(tool.describe(), "executable:redis");
+
+        let nfs = DependencyKey::network_filesystem("files.internal:/models");
+        assert_eq!(nfs.describe(), "network-filesystem:files.internal:/models");
     }
 }

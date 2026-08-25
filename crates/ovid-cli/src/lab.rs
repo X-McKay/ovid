@@ -23,7 +23,8 @@
 use anyhow::{bail, Result};
 use ovid_application::{
     EgressIntent, ExecutableCandidate, LabCapabilities, LabError, LaboratoryPort, NetworkCandidate,
-    PreparedEnvironment, ProviderIdentity, SnapshotRef, TrialObservations, TrialResult, TrialSpec,
+    NfsCandidate, NfsDeclaration, NfsFileAccess, PreparedEnvironment, ProviderIdentity,
+    SnapshotRef, TrialObservations, TrialResult, TrialSpec,
 };
 use ovid_core::{BoundaryEvent, Digest, EventEnvelope};
 use ovid_domain::{
@@ -33,7 +34,8 @@ use ovid_gateway::{GatewayIntent, GatewayPolicy, GatewayServer, Upstream};
 use ovid_observer::aggregate;
 use ovid_packs::PackRegistry;
 use ovid_sandbox::{
-    network_isolation_available, ExecutionBackend, NetworkMode, RunResult, RunSpec, WorkspaceMode,
+    discover_nfs_mounts, network_isolation_available, ExecutionBackend, NetworkMode, RunResult,
+    RunSpec, WorkspaceMode,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -197,6 +199,9 @@ pub struct HostLaboratory {
     /// gateway (parsed from the host proxy env at construction).
     upstream: Option<Upstream>,
     source_digest: String,
+    /// Static deployment declarations used only for no-mount path
+    /// correlation; these paths are never exposed or mounted by Ovid.
+    declared_nfs: Vec<NfsDeclaration>,
     trial_counter: u64,
 }
 
@@ -226,6 +231,7 @@ impl HostLaboratory {
         lab_dir: &Path,
         extra_env: &[String],
         egress: EgressPolicy,
+        declared_nfs: Vec<NfsDeclaration>,
         registry: PackRegistry,
     ) -> Result<HostLaboratory, LabError> {
         let backend: Box<dyn ExecutionBackend> = match kind {
@@ -267,6 +273,7 @@ impl HostLaboratory {
             egress,
             upstream,
             source_digest: source_digest.to_string(),
+            declared_nfs,
             trial_counter: 0,
         })
     }
@@ -473,6 +480,9 @@ impl HostLaboratory {
             Some(observation) => (observation.events.clone(), true),
             None => (vec![], false),
         };
+        // Preserve repeated file operations for NFS access counts before
+        // the general observer aggregation collapses duplicate signatures.
+        let nfs = self.nfs_candidates(&events);
         let aggregated = aggregate(events);
         let network =
             ovid_gateway::analyze_network(&aggregated.events, &self.registry, &BTreeMap::new());
@@ -494,9 +504,26 @@ impl HostLaboratory {
             network: candidates,
             egress_intents: Vec::new(), // filled by merge_intent_candidates
             executables: self.executable_candidates(&aggregated.events, spec, trial_dir),
+            nfs,
             observed,
             events_captured: aggregated.events.len() as u64,
         }
+    }
+
+    /// Correlate observed file operations with the process mount
+    /// namespace's NFS table. The NFS client's network traffic happens in
+    /// the kernel, so mount metadata—not workload socket connects—is the
+    /// authoritative server/export identity.
+    fn nfs_candidates(&self, events: &[EventEnvelope]) -> Vec<NfsCandidate> {
+        let mounts = if self.kind == BackendKind::Process {
+            discover_nfs_mounts()
+        } else {
+            // Host mountinfo does not describe the guest VM namespace.
+            // Declared paths remain useful because Microsandbox receives
+            // no NFS volumes and guest strace reports attempted paths.
+            Vec::new()
+        };
+        nfs_candidates_from_events(events, &mounts, &self.declared_nfs)
     }
 
     /// Environment-provided executable candidates from one trial's events
@@ -715,6 +742,195 @@ impl HostLaboratory {
             evidence: vec![],
         }
     }
+}
+
+fn nfs_candidates_from_events(
+    events: &[EventEnvelope],
+    mounts: &[ovid_sandbox::NfsMount],
+    declarations: &[NfsDeclaration],
+) -> Vec<NfsCandidate> {
+    struct Binding {
+        mount_point: PathBuf,
+        key: DependencyKey,
+        actual_mount: bool,
+    }
+
+    let mut candidates: BTreeMap<DependencyKey, NfsCandidate> = BTreeMap::new();
+    let mut bindings: Vec<Binding> = Vec::new();
+
+    // Declarations are present even when no file operation reaches them:
+    // that distinction lets the report say "declared, not exercised".
+    for declaration in declarations {
+        let mount_point = PathBuf::from(&declaration.mount_point);
+        if !mount_point.is_absolute()
+            || mount_point
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+        bindings.push(Binding {
+            mount_point: mount_point.clone(),
+            key: declaration.key.clone(),
+            actual_mount: false,
+        });
+        let candidate = candidates
+            .entry(declaration.key.clone())
+            .or_insert_with(|| NfsCandidate {
+                key: declaration.key.clone(),
+                server: declaration.server.clone(),
+                export: declaration.export.clone(),
+                fs_types: Vec::new(),
+                mount_points: Vec::new(),
+                read_only: true,
+                declared: true,
+                unavailable_during_trial: true,
+                services: Vec::new(),
+                declaration_sources: Vec::new(),
+                accesses: Vec::new(),
+                evidence: Vec::new(),
+            });
+        if !candidate.fs_types.contains(&declaration.fs_type) {
+            candidate.fs_types.push(declaration.fs_type.clone());
+        }
+        if !candidate.mount_points.contains(&declaration.mount_point) {
+            candidate.mount_points.push(declaration.mount_point.clone());
+        }
+        candidate.read_only &= declaration.read_only;
+        if let Some(service) = &declaration.service {
+            if !candidate.services.contains(service) {
+                candidate.services.push(service.clone());
+            }
+        }
+        let source = format!("{} ({})", declaration.source_file, declaration.source_kind);
+        if !candidate.declaration_sources.contains(&source) {
+            candidate.declaration_sources.push(source);
+        }
+    }
+
+    // Existing host mounts are observed for the process backend only.
+    // They are never created by Ovid. Any actual mount of the same
+    // server/export means that dependency was not absent in this run,
+    // even if the export was also declared at another path.
+    for mount in mounts {
+        let key = DependencyKey::network_filesystem(mount.identity());
+        bindings.push(Binding {
+            mount_point: mount.mount_point.clone(),
+            key: key.clone(),
+            actual_mount: true,
+        });
+        let mount_point = mount.mount_point.display().to_string();
+        let candidate = candidates
+            .entry(key.clone())
+            .or_insert_with(|| NfsCandidate {
+                key,
+                server: mount.server.clone(),
+                export: mount.export.clone(),
+                fs_types: Vec::new(),
+                mount_points: Vec::new(),
+                read_only: true,
+                declared: false,
+                unavailable_during_trial: false,
+                services: Vec::new(),
+                declaration_sources: Vec::new(),
+                accesses: Vec::new(),
+                evidence: Vec::new(),
+            });
+        let same_declared_export = candidate.declared;
+        if !candidate.fs_types.contains(&mount.fs_type) {
+            candidate.fs_types.push(mount.fs_type.clone());
+        }
+        if !candidate.mount_points.contains(&mount_point) {
+            candidate.mount_points.push(mount_point);
+        }
+        candidate.read_only &= mount.read_only;
+        if same_declared_export {
+            candidate.unavailable_during_trial = false;
+        }
+    }
+
+    for envelope in events {
+        let (path, write, failed) = match &envelope.event {
+            BoundaryEvent::FileOpened { path, errno, write } => {
+                (path.as_str(), *write, errno.is_some())
+            }
+            BoundaryEvent::SharedObjectMapped { path } => (path.as_str(), false, false),
+            _ => continue,
+        };
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            // A relative open cannot be attributed safely without tracking
+            // per-process chdir/fchdir state. Unresolved beats a wrong mount.
+            continue;
+        }
+        if path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            // Lexically matching `/mnt/nfs/../local` would attribute a
+            // local target to NFS. Ignore ambiguous traversal instead.
+            continue;
+        }
+        let Some(binding) = bindings
+            .iter()
+            .filter(|binding| path.starts_with(&binding.mount_point))
+            .max_by_key(|binding| {
+                (
+                    binding.mount_point.components().count(),
+                    binding.actual_mount,
+                )
+            })
+        else {
+            continue;
+        };
+        let mount_point = binding.mount_point.display().to_string();
+        let relative = path
+            .strip_prefix(&binding.mount_point)
+            .ok()
+            .map(|suffix| {
+                let display = suffix.display().to_string();
+                if display.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{display}")
+                }
+            })
+            .unwrap_or_else(|| path.display().to_string());
+        let candidate = candidates
+            .get_mut(&binding.key)
+            .expect("every binding initializes its candidate");
+        match candidate
+            .accesses
+            .iter_mut()
+            .find(|access| access.mount_point == mount_point && access.path == relative)
+        {
+            Some(access) => {
+                if write {
+                    access.write_attempts += 1;
+                } else {
+                    access.read_attempts += 1;
+                }
+                access.failures += u64::from(failed);
+            }
+            None => candidate.accesses.push(NfsFileAccess {
+                mount_point,
+                path: relative,
+                read_attempts: u64::from(!write),
+                write_attempts: u64::from(write),
+                failures: u64::from(failed),
+            }),
+        }
+    }
+    for candidate in candidates.values_mut() {
+        candidate.fs_types.sort();
+        candidate.mount_points.sort();
+        candidate.services.sort();
+        candidate.declaration_sources.sort();
+        candidate
+            .accesses
+            .sort_by(|a, b| (&a.mount_point, &a.path).cmp(&(&b.mount_point, &b.path)));
+    }
+    candidates.into_values().collect()
 }
 
 impl LaboratoryPort for HostLaboratory {
@@ -1118,6 +1334,161 @@ fn merge_intent_candidates(observations: &mut TrialObservations, intents: &[Gate
 mod tests {
     use super::*;
 
+    fn boundary_event(sequence: u64, event: BoundaryEvent) -> EventEnvelope {
+        EventEnvelope {
+            event_id: ovid_core::OvidId::from_string(format!("evidence:test-{sequence}")),
+            run_id: ovid_core::OvidId::from_string("run:test"),
+            sequence,
+            wall_time: None,
+            provider: "test".into(),
+            provider_version: "0".into(),
+            trust_tier: ovid_core::TrustTier::T2,
+            process: None,
+            event,
+        }
+    }
+
+    #[test]
+    fn nfs_file_events_are_correlated_and_aggregated_without_content() {
+        let mounts = vec![ovid_sandbox::NfsMount {
+            mount_point: PathBuf::from("/mnt/models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_type: "nfs4".into(),
+            read_only: false,
+        }];
+        let events = vec![
+            boundary_event(
+                1,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/weights/model.bin".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                2,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/weights/model.bin".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                3,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/output.tmp".into(),
+                    errno: Some("EROFS".into()),
+                    write: true,
+                },
+            ),
+            boundary_event(
+                4,
+                BoundaryEvent::FileOpened {
+                    path: "/tmp/local.txt".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                5,
+                BoundaryEvent::FileOpened {
+                    path: "relative-to-unknown-cwd".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+            boundary_event(
+                6,
+                BoundaryEvent::FileOpened {
+                    path: "/mnt/models/../local.txt".into(),
+                    errno: None,
+                    write: false,
+                },
+            ),
+        ];
+
+        let candidates = nfs_candidates_from_events(&events, &mounts, &[]);
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(
+            candidate.key.logical_identity,
+            "files.internal:/exports/models"
+        );
+        assert_eq!(candidate.accesses.len(), 2);
+        assert_eq!(candidate.accesses[0].path, "/output.tmp");
+        assert_eq!(candidate.accesses[0].write_attempts, 1);
+        assert_eq!(candidate.accesses[0].failures, 1);
+        assert_eq!(candidate.accesses[1].path, "/weights/model.bin");
+        assert_eq!(candidate.accesses[1].read_attempts, 2);
+        let json = serde_json::to_string(candidate).unwrap();
+        assert!(!json.contains("file contents"));
+    }
+
+    #[test]
+    fn declared_nfs_paths_capture_failed_reads_without_a_mount() {
+        let declaration = NfsDeclaration {
+            key: DependencyKey::network_filesystem("files.internal:/exports/models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_type: "nfs4".into(),
+            mount_point: "/srv/models".into(),
+            read_only: true,
+            service: Some("model-api".into()),
+            source_file: "compose.yaml".into(),
+            source_kind: "compose".into(),
+        };
+        let events = vec![boundary_event(
+            1,
+            BoundaryEvent::FileOpened {
+                path: "/srv/models/weights/model.bin".into(),
+                errno: Some("ENOENT".into()),
+                write: false,
+            },
+        )];
+
+        let candidates = nfs_candidates_from_events(&events, &[], &[declaration]);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].declared);
+        assert!(candidates[0].unavailable_during_trial);
+        assert_eq!(candidates[0].accesses[0].path, "/weights/model.bin");
+        assert_eq!(candidates[0].accesses[0].failures, 1);
+        assert_eq!(
+            candidates[0].declaration_sources,
+            vec!["compose.yaml (compose)"]
+        );
+    }
+
+    #[test]
+    fn an_existing_export_is_not_mislabeled_absent_at_another_path() {
+        let declaration = NfsDeclaration {
+            key: DependencyKey::network_filesystem("files.internal:/exports/models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_type: "nfs4".into(),
+            mount_point: "/srv/models".into(),
+            read_only: true,
+            service: Some("model-api".into()),
+            source_file: "compose.yaml".into(),
+            source_kind: "compose".into(),
+        };
+        let mount = ovid_sandbox::NfsMount {
+            mount_point: PathBuf::from("/mnt/other-models"),
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            fs_type: "nfs4".into(),
+            read_only: true,
+        };
+
+        let candidates = nfs_candidates_from_events(&[], &[mount], &[declaration]);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].declared);
+        assert!(
+            !candidates[0].unavailable_during_trial,
+            "the same live export means absence was not enforced"
+        );
+    }
+
     #[test]
     fn full_copy_preserves_provisioned_caches() {
         let source = tempfile::tempdir().unwrap();
@@ -1145,6 +1516,7 @@ mod tests {
             &dir.path().join(".lab"),
             &[],
             EgressPolicy::Allow,
+            Vec::new(),
             registry,
         )
         .unwrap();

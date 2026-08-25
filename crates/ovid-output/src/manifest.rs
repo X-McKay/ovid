@@ -31,6 +31,10 @@ pub struct Manifest {
     pub workloads: Vec<WorkloadReport>,
     #[serde(default)]
     pub external_systems: Vec<ExternalSystemReport>,
+    /// Declared or already-mounted network filesystems, plus correlated file
+    /// attempts when a workload was executed.
+    #[serde(default)]
+    pub external_filesystems: Vec<NetworkFilesystemReport>,
     #[serde(default)]
     pub unresolved: Vec<UnresolvedItem>,
     pub completeness: CompletenessSection,
@@ -73,6 +77,8 @@ pub struct SummaryCounts {
     pub components_resolved: usize,
     pub components_loaded: usize,
     pub external_systems: usize,
+    #[serde(default)]
+    pub external_filesystems: usize,
     pub unresolved: usize,
     pub workloads_not_executed: usize,
 }
@@ -251,6 +257,44 @@ pub struct ExternalSystemReport {
     pub evidence: Vec<String>,
 }
 
+/// A declared or observed network filesystem. This reports identity and
+/// access metadata only; file contents and mount credentials are never
+/// captured, and a declaration does not imply that Ovid mounted it.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct NetworkFilesystemReport {
+    pub id: String,
+    /// Filesystem variants observed (`nfs`, `nfs4`).
+    pub protocols: Vec<String>,
+    pub server: String,
+    pub export: String,
+    pub mount_points: Vec<String>,
+    /// True only when every observed mount of this export was read-only.
+    pub read_only: bool,
+    /// Deployment metadata declared this NFS mapping.
+    pub declared: bool,
+    /// The analyzed run had no such NFS export mounted.
+    pub unavailable_during_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declaration_sources: Vec<String>,
+    pub accesses: Vec<NetworkFilesystemAccessReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causality: Option<CausalClassification>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+/// Aggregated access to one path relative to an NFS mount point.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct NetworkFilesystemAccessReport {
+    pub mount_point: String,
+    pub path: String,
+    pub read_attempts: u64,
+    pub write_attempts: u64,
+    pub failures: u64,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
 pub struct WorldSection {
     /// `proposed`, `verified`, `replay-failed`, or `none`.
@@ -340,6 +384,7 @@ impl Manifest {
             build: BuildSection::default(),
             runtime: RuntimeSection::default(),
             external_systems: Vec::new(),
+            external_filesystems: Vec::new(),
             world: WorldSection {
                 status: "none".into(),
                 ..Default::default()
@@ -390,6 +435,7 @@ impl Manifest {
                 .filter(|c| c.states.loaded)
                 .count(),
             external_systems: self.external_systems.len(),
+            external_filesystems: self.external_filesystems.len(),
             unresolved: self.unresolved.len(),
             workloads_not_executed: self.completeness.workloads_not_executed.len(),
         };
@@ -489,6 +535,34 @@ impl Manifest {
                 });
             }
         }
+        for filesystem in &self.external_filesystems {
+            findings.push(Finding {
+                severity: "note".into(),
+                kind: if filesystem.accesses.is_empty() {
+                    "network-filesystem-declared"
+                } else {
+                    "network-filesystem-attempted"
+                }
+                .into(),
+                subject: filesystem.id.clone(),
+                detail: format!(
+                    "{} path(s) attempted below {} declared mount point(s); NFS was {} during the run; causality {}",
+                    filesystem.accesses.len(),
+                    filesystem.mount_points.len(),
+                    if filesystem.unavailable_during_run {
+                        "absent"
+                    } else {
+                        "present or unverified"
+                    },
+                    match filesystem.causality {
+                        Some(CausalClassification::Required) => "required",
+                        Some(CausalClassification::Optional) => "optional",
+                        Some(CausalClassification::Unresolved) | None => "is unresolved",
+                        Some(_) => "was observed",
+                    }
+                ),
+            });
+        }
         for tool in &self.build.tools {
             if tool.causality == Some(CausalClassification::Unresolved) || tool.causality.is_none()
             {
@@ -546,6 +620,9 @@ impl Manifest {
                 "summary" => "read this first: headline, counts, ranked findings",
                 "workloads" => "every executed run and its outcome",
                 "external_systems" => "everything dialed or declared, with identity and causality",
+                "external_filesystems" => {
+                    "mounted NFS exports accessed by workloads (metadata only, never contents)"
+                }
                 "unresolved" => "explicitly unknown — flagged instead of guessed (§6.6)",
                 "completeness" => "what was examined, collapsed, dropped, and NOT executed",
                 "build" => "commands run, tools probed, artifacts produced",
@@ -564,7 +641,7 @@ impl Manifest {
         let mut out = String::new();
         out.push_str(&format!(
             "# Ovid analysis manifest — generated by ovid {OVID_VERSION}\n\
-             # Reading order: summary -> workloads -> external_systems -> unresolved -> completeness.\n\
+             # Reading order: summary -> workloads -> external_systems -> external_filesystems -> unresolved -> completeness.\n\
              # evidence.jsonl is the canonical ledger; every id here resolves into it\n\
              # (`ovid explain <id>`). ovid.json is this same document for machines.\n"
         ));
@@ -636,6 +713,7 @@ mod tests {
         // §25.3: consumers must see explicit empty sections + completeness.
         assert!(yaml.contains("vulnerabilities: []"));
         assert!(yaml.contains("unresolved: []"));
+        assert!(yaml.contains("external_filesystems: []"));
     }
 
     fn manifest_with_story() -> Manifest {
@@ -674,6 +752,46 @@ mod tests {
             .workloads_not_executed
             .push("Test: `make e2e` (Makefile)".into());
         manifest
+    }
+
+    #[test]
+    fn network_filesystem_section_serializes_access_metadata_only() {
+        let mut manifest = Manifest::new("analysis:test".into(), "explore", sample_repository());
+        manifest.external_filesystems.push(NetworkFilesystemReport {
+            id: "files.internal:/exports/models".into(),
+            protocols: vec!["nfs4".into()],
+            server: "files.internal".into(),
+            export: "/exports/models".into(),
+            mount_points: vec!["/mnt/models".into()],
+            read_only: true,
+            declared: true,
+            unavailable_during_run: true,
+            services: vec!["model-api".into()],
+            declaration_sources: vec!["compose.yaml (compose)".into()],
+            accesses: vec![NetworkFilesystemAccessReport {
+                mount_point: "/mnt/models".into(),
+                path: "/weights/model.bin".into(),
+                read_attempts: 2,
+                write_attempts: 0,
+                failures: 0,
+            }],
+            causality: Some(CausalClassification::Unresolved),
+            evidence: vec!["evidence:test".into()],
+        });
+
+        let json = manifest.to_json_pretty();
+        assert!(json.contains("external_filesystems"));
+        assert!(json.contains("/weights/model.bin"));
+        assert!(!json.contains("mount_options"));
+        assert!(!json.contains("content"));
+        let round_trip = Manifest::from_json(&json).unwrap();
+        assert_eq!(round_trip.external_filesystems.len(), 1);
+        let summary = round_trip.build_summary();
+        assert_eq!(summary.counts.external_filesystems, 1);
+        assert!(summary
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "network-filesystem-attempted"));
     }
 
     #[test]

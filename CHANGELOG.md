@@ -10,6 +10,21 @@ the workspace version in `Cargo.toml`. The release workflow
 
 ### Added
 
+- **No-mount NFS dependency analysis.** Static inventory discovers Compose
+  named NFS volumes and direct Kubernetes NFS volumes, including the declaring
+  service and container path, without mounting or contacting them. Microsandbox
+  runs receive declarations only as correlation metadata and expose no NFS
+  folder; guest file attempts are aggregated by relative path with
+  read/write/failure counts. A stable passing no-NFS run proves the export
+  `optional` for that workload scope. A failing run records attempted paths but
+  stays `unresolved`—it never guesses `required` without a controlled passing
+  comparison. Trusted-process trials retain observation of already-mounted NFS
+  exports without creating mounts. The typed journal, proof, manifest, diff,
+  exports, and world projection preserve evidence links while excluding file
+  contents, credentials, and raw mount options.
+- **Current microsandbox CLI compatibility.** The guest adapter now uses the
+  current `msb run` surface and relies on Ovid's host watchdog for the full
+  pull/boot/workload deadline, avoiding removed legacy CLI flags.
 - **Laboratory gateway — egress by name (ADR-017, spec §13.10).** A
   lab-controlled, std-only HTTP proxy names every destination a workload
   tries to reach (scheme, host, port, method, path) even when a loopback

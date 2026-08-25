@@ -31,7 +31,9 @@ fn temp_out(name: &str) -> PathBuf {
     dir
 }
 
-#[cfg(unix)]
+// This process-backend truth fixture asserts strace-derived executable
+// candidates. macOS exercises the same observer inside Microsandbox.
+#[cfg(target_os = "linux")]
 #[test]
 fn prove_truth_fixture_reaches_a_verified_world() {
     let out = temp_out("truth");

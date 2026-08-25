@@ -14,7 +14,9 @@ use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use ovid_core::{ClaimState, ClaimStates, IdGenerator, OvidId, TrustTier};
 use ovid_evidence::{Claim, ClaimStore, EvidenceLedger, EvidenceRecord};
 use ovid_inventory::InventoryReport;
-use ovid_output::{ExternalSystemReport, Manifest, RepositorySection, UnresolvedItem};
+use ovid_output::{
+    ExternalSystemReport, Manifest, NetworkFilesystemReport, RepositorySection, UnresolvedItem,
+};
 use ovid_packs::PackRegistry;
 use ovid_planner::ActionKind;
 use ovid_repository::{acquire, AcquireOptions, RepoSnapshot, RepositorySource};
@@ -227,6 +229,77 @@ fn absorb_declared_services(
             declared_sources: vec![service.source_file.clone()],
             evidence: vec![evidence_id.to_string()],
         });
+    }
+    Ok(())
+}
+
+/// Record declared NFS mappings without mounting or contacting them.
+fn absorb_declared_nfs(
+    ctx: &mut Context,
+    manifest: &mut Manifest,
+    snapshot: &RepoSnapshot,
+) -> Result<()> {
+    let repo_subject = format!("repository:{}", snapshot.canonical_url);
+    for declaration in ovid_inventory::scan_declared_nfs(snapshot) {
+        let evidence_id = ctx.record(
+            "nfs-mount-declared",
+            "ovid-inventory",
+            TrustTier::T4,
+            serde_json::to_value(&declaration)?,
+        )?;
+        ctx.claim(
+            "declares",
+            repo_subject.clone(),
+            format!("network-filesystem:{}", declaration.identity()),
+            ClaimStates::default().with(ClaimState::Declared),
+            vec![evidence_id.clone()],
+        );
+        let source = format!("{} ({})", declaration.source_file, declaration.source_kind);
+        if let Some(existing) = manifest
+            .external_filesystems
+            .iter_mut()
+            .find(|filesystem| filesystem.id == declaration.identity())
+        {
+            if !existing.mount_points.contains(&declaration.mount_point) {
+                existing.mount_points.push(declaration.mount_point.clone());
+            }
+            if !existing.protocols.contains(&declaration.fs_type) {
+                existing.protocols.push(declaration.fs_type.clone());
+            }
+            if let Some(service) = declaration.service {
+                if !existing.services.contains(&service) {
+                    existing.services.push(service);
+                }
+            }
+            if !existing.declaration_sources.contains(&source) {
+                existing.declaration_sources.push(source);
+            }
+            existing.evidence.push(evidence_id.to_string());
+            existing.read_only &= declaration.read_only;
+            continue;
+        }
+        manifest.external_filesystems.push(NetworkFilesystemReport {
+            id: declaration.identity(),
+            protocols: vec![declaration.fs_type],
+            server: declaration.server,
+            export: declaration.export,
+            mount_points: vec![declaration.mount_point],
+            read_only: declaration.read_only,
+            declared: true,
+            unavailable_during_run: false,
+            services: declaration.service.into_iter().collect(),
+            declaration_sources: vec![source],
+            accesses: Vec::new(),
+            causality: None,
+            evidence: vec![evidence_id.to_string()],
+        });
+    }
+    for filesystem in &mut manifest.external_filesystems {
+        filesystem.protocols.sort();
+        filesystem.mount_points.sort();
+        filesystem.services.sort();
+        filesystem.declaration_sources.sort();
+        filesystem.evidence.sort();
     }
     Ok(())
 }
@@ -461,6 +534,7 @@ pub fn run_inspect(
         .limitations
         .push("inspect mode: no code was executed; dynamic states are unknown".into());
     absorb_declared_services(&mut ctx, &mut manifest, &snapshot)?;
+    absorb_declared_nfs(&mut ctx, &mut manifest, &snapshot)?;
     absorb_declared_endpoints(&mut ctx, &mut manifest, &snapshot)?;
     finalize(&mut ctx, &mut manifest)?;
 
@@ -548,6 +622,18 @@ pub fn print_summary(manifest: &Manifest, out_dir: &Path) {
                 .causality
                 .map(|c| format!("causality={c:?}"))
                 .unwrap_or_else(|| system.identity.clone())
+        );
+    }
+    for filesystem in &manifest.external_filesystems {
+        println!(
+            "external filesystem: {} -> {} [{}]",
+            filesystem.id,
+            filesystem.mount_points.join(", "),
+            if filesystem.accesses.is_empty() {
+                "declared"
+            } else {
+                "attempted"
+            }
         );
     }
     for item in &manifest.unresolved {

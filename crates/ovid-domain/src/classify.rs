@@ -79,6 +79,32 @@ fn unresolved(key: &DependencyKey, reason: impl Into<String>) -> CausalConclusio
     }
 }
 
+/// Record observed dependencies that have no safe, enforced treatment yet.
+///
+/// Observation proves use, not necessity. Mounted filesystems in particular
+/// require a mount-namespace intervention (or a controlled replacement
+/// fixture) before Ovid may call them required or optional. Until then they
+/// remain explicitly unresolved rather than being guessed (spec §6.6,
+/// proposal §10.7).
+pub fn classify_observed_without_treatment(
+    baseline: &BaselineVerdict,
+    candidates: &[CandidateEvidence],
+    treatment_gap: &str,
+) -> Vec<CausalConclusion> {
+    let reason = if baseline.supports_experiments() {
+        format!(
+            "dependency was observed during a stable passing baseline, but no enforced \
+             counterfactual was run: {treatment_gap}"
+        )
+    } else {
+        format!("baseline is not stable-passing ({})", baseline.describe())
+    };
+    candidates
+        .iter()
+        .map(|candidate| unresolved(&candidate.key, reason.clone()))
+        .collect()
+}
+
 /// Classify every candidate as unresolved because the laboratory could
 /// not enforce the treatment at all (proposal §5.5: if the required
 /// treatment cannot be enforced, the result is `unresolved`; Ovid must
@@ -325,6 +351,26 @@ mod tests {
 
     fn stable_baseline() -> BaselineVerdict {
         assess_baseline(&[TrialOutcome::passed(), TrialOutcome::passed()])
+    }
+
+    #[test]
+    fn observed_mount_without_treatment_stays_unresolved() {
+        let candidate = CandidateEvidence {
+            key: DependencyKey::network_filesystem("files.internal:/models"),
+            externally_controlled: true,
+            unavailable_under_treatment: false,
+            attempted_in_baseline: true,
+        };
+        let conclusions = classify_observed_without_treatment(
+            &stable_baseline(),
+            &[candidate],
+            "mount removal is unavailable",
+        );
+        assert_eq!(conclusions[0].necessity(), Necessity::Unresolved);
+        assert!(conclusions[0]
+            .reason()
+            .contains("no enforced counterfactual"));
+        assert!(conclusions[0].reason().contains("mount removal"));
     }
 
     fn enforced_trial(label: &str, passed: bool) -> TrialRecord {

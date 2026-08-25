@@ -94,6 +94,17 @@ Supporting commands and machinery:
   rotation into one logical dependency), resolver bypass is flagged,
   and destinations with no observed resolution are explicitly marked
   `ip-only` rather than silently nameless.
+- **No-mount NFS dependency probes** — Ovid discovers named Compose NFS
+  volumes and direct Kubernetes NFS volumes without contacting their servers.
+  A microsandbox trial exposes only Ovid's disposable workspace—not the
+  declared NFS paths—and guest strace records absolute file attempts below
+  each declared container mount point. Manifests preserve service,
+  server/export, relative path, access direction, failures, and evidence ids,
+  never file contents, credentials, or raw mount options. A passing no-NFS
+  workload proves that export optional for the tested scope; a failing run
+  reports the attempted paths but leaves necessity `unresolved` rather than
+  guessing `required`. The trusted process backend can additionally observe
+  already-mounted NFS exports, but never creates them.
 - **Evidence ledger**: append-only, hash-chained JSONL with tamper
   detection; typed journal events; the chain head is published in every
   manifest's provenance.
@@ -180,7 +191,9 @@ clone first and run `scripts/install.sh` from the checkout with
 - `git` for URL-based acquisition
 - Optional: the `msb` CLI (<https://microsandbox.dev>) for
   `--backend microsandbox` — libkrun guest VMs on Linux/KVM,
-  macOS/Apple Silicon, or Windows/WHP
+  macOS/Apple Silicon, or Windows/WHP. The selected guest image must contain
+  the workload's tools and `strace` for boundary/file-attempt evidence; Ovid
+  records an explicit completeness limitation when observation is unavailable
 
 ### Run
 

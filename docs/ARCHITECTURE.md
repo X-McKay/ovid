@@ -263,6 +263,38 @@ repositories" on any Linux host:
 It is **not** a security boundary; its `IsolationTier::TrustedProcess`
 is recorded in every manifest so isolation claims stay honest.
 
+### NFS discovery and no-mount trials
+
+Inventory scans named Compose volumes with `driver_opts.type: nfs|nfs4` and
+direct Kubernetes `volumes[].nfs` declarations, joining them to each
+service/container mount path. This is T4 declaration evidence only: scanning
+never resolves the server, contacts it, mounts the export, or reads its files.
+PVC/PV indirection is not resolved yet; absence from this scanner is therefore
+not evidence that such a repository has no NFS dependency.
+
+The microsandbox laboratory receives those declarations only as path-matching
+metadata. Its command line exposes the disposable workload workspace at
+`/workspace`; it does not expose a declared NFS path or any source folder for
+one. Guest strace records absolute `file-opened` and `shared-object-mapped`
+attempts. Ovid correlates the most-specific declared mount point and aggregates
+relative path, read/write count, and failure count. Relative paths and paths
+containing `..` are not attributed because doing so without per-process
+working-directory state could produce a false match.
+
+This makes the baseline a natural no-NFS counterfactual. If the workload is
+stable and passes, the declared export is `optional` for that workload scope,
+whether it ignored the path or probed it and recovered. If the workload fails,
+Ovid reports the attempted paths and keeps necessity `unresolved`: absence plus
+failure is correlation, not proof that NFS was the cause. A `required` label
+would need a controlled passing comparison (for example, a safe synthetic
+fixture) and is deliberately not minted by this feature.
+
+For trusted-process trials, Ovid also inventories an already-visible mount
+namespace (`/proc/self/mountinfo` on Linux; the system mount table on
+macOS/BSD). It never creates a mount. Access to a live NFS export is useful
+observation evidence but remains `unresolved` because the export was not
+removed or replaced under laboratory control.
+
 ### microsandbox backend (host-independent guest VMs)
 
 `ovid-sandbox/src/microsandbox.rs` drives the `msb` CLI
@@ -270,9 +302,10 @@ is recorded in every manifest so isolation claims stay honest.
 always Linux, so the strace observer and the offline/online
 counterfactual behave identically regardless of host OS:
 
-- the workspace is mounted at `/workspace` (workdir), with HOME/TMPDIR
-  scoped inside it; only explicitly inherited variables reach the guest
-  (host PATH/HOME never do — they are host-specific);
+- an Ovid-created disposable workspace copy is mounted at `/workspace`
+  (workdir), with HOME/TMPDIR scoped inside it; declared NFS paths and other
+  repository-named host folders are never mounted, and only explicitly
+  inherited variables reach the guest (host PATH/HOME never do);
 - `NetworkMode::Isolated` maps to `msb run --no-net`, a true
   default-deny for the guest, so the egress-denied trials need no user
   namespaces here;

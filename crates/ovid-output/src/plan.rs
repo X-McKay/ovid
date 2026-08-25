@@ -53,6 +53,26 @@ pub fn integration_plan_markdown(manifest: &Manifest, lock: Option<&WorldLock>) 
         out.push('\n');
     }
 
+    if !manifest.external_filesystems.is_empty() {
+        out.push_str("## Network filesystem dependencies\n\n");
+        out.push_str("| Dependency | Protocol | Mounts | Paths | Causality |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for filesystem in &manifest.external_filesystems {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                filesystem.id,
+                filesystem.protocols.join(", "),
+                filesystem.mount_points.join(", "),
+                filesystem.accesses.len(),
+                filesystem
+                    .causality
+                    .map(|causality| format!("{causality:?}"))
+                    .unwrap_or_else(|| "unknown".into()),
+            ));
+        }
+        out.push('\n');
+    }
+
     if let Some(lock) = lock {
         out.push_str("## Startup order\n\n");
         for (index, cell) in lock.startup_order.iter().enumerate() {
