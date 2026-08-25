@@ -146,7 +146,10 @@ These come from the spec and are load-bearing; tests enforce most of them:
 
 ## Skills
 
-Task-specific playbooks live in `.claude/skills/`:
+Task-specific playbooks live in `.claude/skills/`. They are plain Markdown,
+so Codex and other agents can read them too (indexed in `AGENTS.md`).
+
+Developing Ovid:
 
 - `add-scanner` — adding an ecosystem inventory scanner.
 - `add-pack` — authoring/validating packs.
@@ -155,6 +158,14 @@ Task-specific playbooks live in `.claude/skills/`:
   treatments, enforcement, or the laboratory gateway/egress.
 - `oss-validation` — running the open-source validation suite and
   updating `docs/VALIDATION.md`.
+
+Operating Ovid (running the tool, not changing it):
+
+- `setup-ovid` — install Ovid and host prerequisites; verify with
+  `ovid doctor`.
+- `use-ovid` — choose the command, egress posture, backend and trust
+  opt-ins; read results honestly (and answer "is it safe to run?").
+- `troubleshoot-ovid` — diagnose failing or surprising runs.
 
 Use them; they encode the end-to-end checklists (code + tests + goldens +
 docs) that keep changes consistent.

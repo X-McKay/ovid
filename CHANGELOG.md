@@ -8,6 +8,20 @@ the workspace version in `Cargo.toml`. The release workflow
 
 ## [Unreleased]
 
+### Documentation
+
+- **Safety & isolation section** (README + `docs/ARCHITECTURE.md`): what
+  the default `--egress deny` posture guarantees (workload trials contact
+  nothing real), the two deliberate exceptions (online provisioning;
+  `--egress allow`), the partial-deny caveat on hosts without user
+  namespaces, and the process-vs-guest-VM trust boundary — with a
+  per-activity decision table.
+- **Operating skills** for running Ovid, usable by Claude Code and Codex
+  (`.claude/skills/`, indexed in a new root `AGENTS.md`): `setup-ovid`
+  (install + host prerequisites + `ovid doctor`), `use-ovid` (command,
+  egress, backend and trust choices; reading results), and
+  `troubleshoot-ovid` (diagnosing failing or surprising runs).
+
 ### Added
 
 - **No-mount NFS dependency analysis.** Static inventory discovers Compose
