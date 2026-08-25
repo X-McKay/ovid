@@ -321,6 +321,35 @@ Select it with `--backend microsandbox --guest-image <image>` on
 execute the complete laboratory contract (proposal §8.3's deferral),
 not as a configuration plane without a runtime.
 
+## Safety & isolation
+
+The isolation guarantees are the composition of the mechanisms above, and
+Ovid states them honestly rather than aspirationally:
+
+- **Workload trials contact nothing real under the default deny posture.**
+  Baseline, intervention, and replay trials run behind a network namespace
+  and the in-namespace deny gateway (see *The laboratory gateway*); the
+  kernel blocks direct sockets and the gateway refuses proxied requests.
+  Enforced by invariant 15 and its tests.
+- **Provisioning is deliberately online.** The pre-snapshot provision step
+  runs with host network (`EnforcementReport` mechanism `host-network`) so
+  it can populate the frozen snapshot's caches (ADR-013/§10.8). Real
+  outbound traffic to registries happens here, and only here, on the
+  default path.
+- **Degraded hosts degrade honestly.** Without unprivileged user
+  namespaces the deny posture becomes `gateway-deny-partial`
+  (`EnforcementStatus::PartiallyEnforced`): proxied requests are refused
+  but direct sockets are not blocked, and the classifier will not mint
+  strong causal labels from a partially-enforced trial (ADR-014).
+- **Backends never overclaim.** The process backend is host namespace
+  isolation for trusted repositories, not a security boundary; the
+  microsandbox backend is a libkrun guest VM. Each claims exactly its tier
+  (invariant 8), and remote sources refuse the host process without
+  `--trusted-process` (ADR-011).
+
+The user-facing decision table lives in the README's *Safety & isolation*
+section; `ovid doctor` reports which guarantees hold on the current host.
+
 ## Worlds and outputs
 
 A `World` is content-addressed. `WorldLock::from_world` produces the

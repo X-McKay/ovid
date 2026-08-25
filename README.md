@@ -263,6 +263,63 @@ code. Untrusted-repository analysis uses the microsandbox guest-VM
 laboratory (`--backend microsandbox`); remote sources refuse the host
 process without an explicit `--trusted-process` opt-in.
 
+## Safety & isolation
+
+Ovid runs repository code to observe it, so "will this contact real
+systems or put load on them?" is a fair question. The honest answer has
+one guarantee, two deliberate exceptions, and one host caveat. Run
+`ovid doctor` first — it reports exactly which of these apply on your host.
+
+**What is contained (enforced, tested).** Under the default
+`--egress deny`, every workload *trial* — the baseline, every
+intervention, and the verification replay — runs inside a network
+namespace with an in-namespace deny gateway. The kernel blocks direct
+sockets and the gateway *refuses* proxied requests, recording only the
+destination name. The workload contacts **nothing real** (invariant 15,
+test-enforced). `ovid inspect` is static-only and executes nothing at all.
+
+**Exception 1 — provisioning is intentionally online.** Before the
+sandboxed trials, the provision step (e.g. `make deps`, run by `prove` to
+install dependencies into the frozen snapshot) executes with **full host
+network** so it can reach package registries — its enforcement record
+reads `host-network`. This is real outbound traffic to PyPI, npm,
+crates.io, and anything else the provision command contacts. If you need
+zero external contact, provision offline / from a warm cache and pass no
+provision command.
+
+**Exception 2 — `--egress allow` is real traffic by design.** It forwards
+attributed egress through the host proxy so network dependencies can be
+classified causally (and blocked one at a time). You are opting into real
+contact; it is never the default.
+
+**Host caveat — partial deny.** If the host lacks unprivileged user
+namespaces, deny degrades to `gateway-deny-partial`: proxy variables are
+stripped and the gateway refuses proxied requests, but the kernel cannot
+block a *direct* socket to an IP. Ovid marks this `PartiallyEnforced` and
+the classifier will not mint strong causal labels from it — but it is not
+an airtight traffic block. `ovid doctor` flags whether user namespaces are
+available; use `--backend microsandbox` for a hard boundary.
+
+**Trust boundary.** The default process backend is namespace isolation on
+the host, **not** a VM — it is for repositories you trust and is not a
+hardened jail against hostile code. Untrusted or remote code should run in
+the microsandbox guest VM (`--backend microsandbox`, libkrun); remote
+sources refuse the host process without an explicit `--trusted-process`
+opt-in (ADR-011). Ovid always claims its true isolation tier and never
+silently falls back from a VM to the host (invariant 8).
+
+| Activity | Default posture | Real external contact? |
+|---|---|---|
+| `ovid inspect` | static only | none (no execution) |
+| Provisioning (`--provision` / `prove`'s default deps step) | host network | **yes** — package registries etc. |
+| Workload trials, `--egress deny`, user namespaces present | netns + deny gateway | none |
+| Workload trials, `--egress deny`, no user namespaces | partial deny | possible via direct sockets |
+| Workload trials, `--egress allow` | forward gateway | **yes** — attributed, by design |
+
+For agent-assisted setup, day-to-day use, and diagnosing the above, see
+the `setup-ovid`, `use-ovid`, and `troubleshoot-ovid` skills in
+`.claude/skills/` (also indexed for Codex in `AGENTS.md`).
+
 ## Testing
 
 ```sh
